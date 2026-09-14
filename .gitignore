@@ -1,0 +1,10 @@
+/q_backend/
+/q_contracts/
+/q_core/
+/q_frontend/
+/q_terminal/
+/.worktrees/
+/q-workspace/.serena/cache/
+/q-workspace/.serena/logs/
+tools/.venv/
+__pycache__/
