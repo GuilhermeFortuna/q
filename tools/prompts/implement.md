@@ -11,13 +11,19 @@ You are implementing board task $title.
 $resume
 ## Before you start
 
+All paths above are relative to the workspace root `$workspace`, where this session
+starts. Run git and repository checks inside `$workspace/$workdir`
+(e.g. `git -C $workspace/$workdir status`, `git -C $workspace/$workdir log development..$branch`).
+Never run `git commit` or other git commands directly in `$workspace` — it is the
+meta-repo, not the task's repository.
+
 1. Read `AGENTS.md` in the workspace root.
 2. Read the repository instructions: $repo_agents.
 3. Read the issue (`gh issue view $issue_url`), then the spec and the plan in full.
 
 ## Doing the work
 
-- Work only inside `$workdir`, on `$branch`.
+- Work only inside `$workspace/$workdir`, on `$branch`.
 - Follow the plan task by task. Tick plan checkboxes as you complete steps.
 - Commit locally with focused commits that follow the repository's conventions.
 - Run the repository's documented checks (tests, lint, type checks, `make contracts-check`
@@ -29,8 +35,8 @@ $resume
 
 When the work is complete and the checks pass, run:
 
-    ./work board set $id in-review -m "<what was done; checks run and their results; open follow-ups>"
+    $workspace/work board set $id in-review -m "<what was done; checks run and their results; open follow-ups>"
 
 If you cannot continue, run the following and stop:
 
-    ./work board set $id blocked -m "<what blocks you and what is needed>"
+    $workspace/work board set $id blocked -m "<what blocks you and what is needed>"

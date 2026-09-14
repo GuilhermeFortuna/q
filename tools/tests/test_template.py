@@ -14,6 +14,7 @@ VALUES = {
     "branch": "Q-010-transactional-outbox",
     "resume": "",
     "repo_agents": "`q_backend/README.md`",
+    "workspace": "/home/gui/projects/q",
 }
 
 
@@ -21,8 +22,9 @@ def test_implement_template_renders(tmp_path):
     text = render("implement", VALUES)
     assert "Q-010 — Transactional outbox" in text
     assert "q_backend/docs/development/plans/Q-010-transactional-outbox-plan.md" in text
-    assert "./work board set Q-010 in-review" in text
-    assert "./work board set Q-010 blocked" in text
+    assert "/home/gui/projects/q/work board set Q-010 in-review" in text
+    assert "/home/gui/projects/q/work board set Q-010 blocked" in text
+    assert "/home/gui/projects/q/q_backend" in text
     assert "$" not in text.replace("$ ", "")
 
 

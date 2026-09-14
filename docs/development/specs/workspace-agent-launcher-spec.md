@@ -53,9 +53,12 @@ Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `q_workspace.code-works
   - the board workflow and status rules (section 2.2);
   - agents never push, merge, check out `development`, or close issues;
   - use the `gh` CLI for GitHub operations.
-- `q/CLAUDE.md` contains only `@AGENTS.md`. Codex CLI, Cursor CLI and Antigravity CLI
-  read `AGENTS.md` natively (Antigravity also references `GEMINI.md`; no `GEMINI.md` is
-  added, to avoid loading instructions twice — confirmed against `agy` during implementation).
+- `q/CLAUDE.md` contains only `@AGENTS.md`. Codex CLI and Cursor CLI read `AGENTS.md`
+  natively. Antigravity CLI (`agy` 1.2.2) did not load `AGENTS.md` or `GEMINI.md` in a
+  live check, with or without a `GEMINI.md` importing `AGENTS.md`, so no `GEMINI.md` is
+  added. Agents launched through `./work` still get the workspace rules because
+  `prompts/implement.md` tells them to read `AGENTS.md` first; ad-hoc `agy` sessions
+  started outside `./work` do not.
 
 ### 1.3 Serena workspace
 
@@ -222,21 +225,27 @@ and the rendered prompt, and changes nothing (no branch, worktree, status or lau
 ### 2.8 Prompt template
 
 `prompts/implement.md` uses `string.Template` placeholders:
-`$id $title $repo $issue_url $spec $plan $workdir $branch $resume $repo_agents`
+`$id $title $repo $issue_url $spec $plan $workdir $branch $resume $repo_agents $workspace`
 (`$repo_agents` lists whichever of the repo's `AGENTS.md`/`CLAUDE.md`/`README.md` exist;
-`$resume` is a note that previous work exists on the branch, or empty).
+`$resume` is a note that previous work exists on the branch, or empty; `$workspace` is
+the absolute path of the workspace root — the directory the agent process starts in —
+so relative paths like `$workdir` and the `./work` commands can be resolved
+unambiguously regardless of the agent's own current-directory handling).
 Unknown or missing placeholders are an error.
 
 The template instructs the agent to:
 
 1. Read `q/AGENTS.md`, the repo instruction files, the issue, the spec and the plan.
-2. Work only in `$workdir` on `$branch`; follow the plan task by task; commit locally
-   with focused commits.
-3. Run the repository's documented checks; fix failures caused by the change.
-4. Never push, merge, check out `development`, or close the issue.
-5. On completion: `./work board set $id in-review -m "<acceptance summary: what was
-   done, checks run and results, open follow-ups>"`.
-6. If blocked: `./work board set $id blocked -m "<reason>"` and stop.
+2. Treat `$workdir` and other paths as relative to `$workspace`; run git and repository
+   checks inside `$workspace/$workdir` and never run git commands directly in
+   `$workspace` (it is the meta-repo, not the task's repository).
+3. Work only in `$workspace/$workdir` on `$branch`; follow the plan task by task; commit
+   locally with focused commits.
+4. Run the repository's documented checks; fix failures caused by the change.
+5. Never push, merge, check out `development`, or close the issue.
+6. On completion: `$workspace/work board set $id in-review -m "<acceptance summary: what
+   was done, checks run and results, open follow-ups>"`.
+7. If blocked: `$workspace/work board set $id blocked -m "<reason>"` and stop.
 
 ## Part 3 — Error handling
 
