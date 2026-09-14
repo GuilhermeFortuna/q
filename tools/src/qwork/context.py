@@ -1,0 +1,42 @@
+"""Everything a command needs from the outside world, injectable for tests."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TextIO
+
+from qwork.board import Board
+from qwork.runner import Runner, run
+
+
+def default_workspace() -> Path:
+    env = os.environ.get("QWORK_WORKSPACE")
+    return Path(env).resolve() if env else Path(__file__).resolve().parents[3]
+
+
+@dataclass
+class Context:
+    workspace: Path
+    board: Board
+    run: Runner
+    out: TextIO
+    err: TextIO
+    execvp: Callable[[str, list[str]], object]
+    which: Callable[[str], str | None]
+
+    @classmethod
+    def default(cls) -> Context:
+        return cls(
+            workspace=default_workspace(),
+            board=Board(run),
+            run=run,
+            out=sys.stdout,
+            err=sys.stderr,
+            execvp=os.execvp,
+            which=shutil.which,
+        )

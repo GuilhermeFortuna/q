@@ -85,3 +85,13 @@ def git(cwd: Path, *args: str) -> str:
 def write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+class RecordingExec:
+    """Stands in for os.execvp."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    def __call__(self, file: str, argv: list[str]) -> None:
+        self.calls.append(list(argv))

@@ -1,6 +1,10 @@
+import io
+
 import pytest
 
-from helpers import git, write
+from helpers import STATUS_OPTIONS, FakeRunner, RecordingExec, git, write
+from qwork.board import Board
+from qwork.context import Context
 
 
 @pytest.fixture(autouse=True)
@@ -28,3 +32,23 @@ def workspace(tmp_path):
     git(repo, "checkout", "--quiet", "-b", "development")
     git(repo, "push", "--quiet", "-u", "origin", "development")
     return ws
+
+
+@pytest.fixture
+def make_ctx(workspace, monkeypatch):
+    monkeypatch.chdir(workspace)
+
+    def factory(items, status_options=STATUS_OPTIONS):
+        fake = FakeRunner(items, status_options)
+        ctx = Context(
+            workspace=workspace,
+            board=Board(fake),
+            run=fake,
+            out=io.StringIO(),
+            err=io.StringIO(),
+            execvp=RecordingExec(),
+            which=lambda name: f"/usr/bin/{name}",
+        )
+        return ctx, fake
+
+    return factory
