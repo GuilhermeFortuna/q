@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 
 from qwork.agents import AGENTS, build_command
@@ -24,6 +25,18 @@ def _warn_if_behind(ctx: Context, git: Git) -> None:
         return
     if behind:
         print(f"work: warning: local development is {behind} commit(s) behind origin/development", file=ctx.err)
+
+
+def _launch_env(env: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `env` safe to launch an agent with: no qwork venv or workspace marker."""
+    clean = dict(env)
+    venv = clean.pop("VIRTUAL_ENV", None)
+    clean.pop("QWORK_WORKSPACE", None)
+    if venv:
+        venv_bin = str(Path(venv) / "bin")
+        parts = [p for p in clean.get("PATH", "").split(os.pathsep) if p != venv_bin]
+        clean["PATH"] = os.pathsep.join(parts)
+    return clean
 
 
 def start(
@@ -93,6 +106,7 @@ def start(
             "branch": task.branch,
             "resume": resume_note,
             "repo_agents": ", ".join(f"`{rel(p)}`" for p in files.instructions) or "none",
+            "workspace": str(ctx.workspace),
         },
     )
     launch = build_command(agent, prompt, effort, model)
@@ -129,5 +143,9 @@ def start(
 
     print(f"work: {task.id} on {task.branch} in {rel(workdir)}; launching {agent}", file=ctx.err)
     os.chdir(ctx.workspace)
-    ctx.execvp(launch.argv[0], launch.argv)
+    env = _launch_env(os.environ)
+    try:
+        ctx.execvp(launch.argv[0], launch.argv, env)
+    except OSError as exc:
+        raise QworkError(f"failed to launch '{agent}': {exc}") from None
     return 0

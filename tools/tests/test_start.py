@@ -35,7 +35,8 @@ def test_dry_run_changes_nothing(make_ctx):
     assert "Dry run" in out
     assert f"create branch {BRANCH} from development" in out
     assert "launch: codex -c model_reasoning_effort=high <prompt>" in out
-    assert "./work board set Q-010 in-review" in out
+    assert f"{ctx.workspace}/work board set Q-010 in-review" in out
+    assert f"relative to the workspace root `{ctx.workspace}`" in out
 
 
 def test_start_with_worktree(make_ctx):
@@ -101,6 +102,43 @@ def test_invalid_effort_is_refused_before_changes(make_ctx):
     assert main(["start", "Q-010", "--agent", "antigravity", "--effort", "max"], ctx) == 1
     assert "does not support effort 'max'" in ctx.err.getvalue()
     assert git(ctx.workspace / "q_backend", "branch", "--list", BRANCH) == ""
+
+
+def test_launch_env_strips_qwork_venv(make_ctx, monkeypatch):
+    ctx, fake = make_ctx([q010()])
+    monkeypatch.setenv("VIRTUAL_ENV", "/opt/q/tools/.venv")
+    monkeypatch.setenv("QWORK_WORKSPACE", "/opt/q")
+    monkeypatch.setenv("PATH", "/opt/q/tools/.venv/bin:/usr/bin:/bin")
+    monkeypatch.setenv("KEEP_ME", "yes")
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 0
+    [env] = ctx.execvp.envs
+    assert "VIRTUAL_ENV" not in env
+    assert "QWORK_WORKSPACE" not in env
+    assert "/opt/q/tools/.venv/bin" not in env["PATH"].split(os.pathsep)
+    assert "/usr/bin" in env["PATH"].split(os.pathsep)
+    assert env["KEEP_ME"] == "yes"
+
+
+def test_launch_env_untouched_without_virtualenv(make_ctx, monkeypatch):
+    ctx, fake = make_ctx([q010()])
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 0
+    [env] = ctx.execvp.envs
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
+def test_exec_failure_is_reported_as_one_line(make_ctx):
+    ctx, fake = make_ctx([q010()])
+
+    def boom(argv0, argv, env):
+        raise OSError(2, "No such file or directory")
+
+    ctx.execvp = boom
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 1
+    err = ctx.err.getvalue()
+    assert "Traceback" not in err
+    assert "work: failed to launch" in err
 
 
 def test_warns_when_development_is_behind_origin(make_ctx):

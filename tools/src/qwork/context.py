@@ -26,7 +26,7 @@ class Context:
     run: Runner
     out: TextIO
     err: TextIO
-    execvp: Callable[[str, list[str]], object]
+    execvp: Callable[[str, list[str], dict[str, str]], object]
     which: Callable[[str], str | None]
 
     @classmethod
@@ -37,6 +37,6 @@ class Context:
             run=run,
             out=sys.stdout,
             err=sys.stderr,
-            execvp=os.execvp,
+            execvp=os.execvpe,
             which=shutil.which,
         )

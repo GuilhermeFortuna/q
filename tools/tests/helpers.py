@@ -88,10 +88,12 @@ def write(path: Path, text: str) -> None:
 
 
 class RecordingExec:
-    """Stands in for os.execvp."""
+    """Stands in for os.execvpe."""
 
     def __init__(self):
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
 
-    def __call__(self, file: str, argv: list[str]) -> None:
+    def __call__(self, file: str, argv: list[str], env: dict[str, str]) -> None:
         self.calls.append(list(argv))
+        self.envs.append(dict(env))
