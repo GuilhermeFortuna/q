@@ -50,6 +50,9 @@ Environment:
   Q_RESEARCH_BACKEND_IMAGE   Image tag (default: q-backend:dev)
   Q_RESEARCH_HEALTH_URL      API health URL to poll
   Q_RESEARCH_ROOT            Workspace root override (tests only)
+  Q_RESEARCH_UI              tauri (default) | browser
+                             Use browser when the Tauri/WebKit shell crashes on
+                             NVIDIA+Wayland (opens http://localhost:1420).
 
 Image-defining inputs (any change triggers a rebuild):
   Dockerfile, pyproject.toml, uv.lock, docker/entrypoint.sh,
@@ -280,18 +283,44 @@ main() {
 
   wait_for_api 90
 
-  echo "launching Research UI (Tauri) ..."
+  local ui_mode="${Q_RESEARCH_UI:-tauri}"
+  echo "launching Research UI ($ui_mode) ..."
   echo "  API:   $API_HEALTH_URL"
   echo "  image: $BACKEND_IMAGE"
   echo "  data:  $BACKEND_DIR/data"
   echo "  Ctrl+C stops the UI and tears down containers."
   echo
 
-  (
-    cd "$FRONTEND_DIR"
-    exec pnpm tauri:dev
-  ) &
-  UI_PID=$!
+  # NVIDIA + WebKitGTK workarounds for the Tauri shell (no-ops for browser mode).
+  # See https://v2.tauri.app/develop/debug/linux-graphics/
+  export __NV_DISABLE_EXPLICIT_SYNC="${__NV_DISABLE_EXPLICIT_SYNC:-1}"
+  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+
+  case "$ui_mode" in
+    tauri)
+      (
+        cd "$FRONTEND_DIR"
+        exec pnpm tauri:dev
+      ) &
+      UI_PID=$!
+      ;;
+    browser)
+      need xdg-open
+      (
+        cd "$FRONTEND_DIR"
+        exec pnpm dev
+      ) &
+      UI_PID=$!
+      # Give Vite a moment, then open the system browser against the live API.
+      sleep 2
+      xdg-open "http://127.0.0.1:1420/" >/dev/null 2>&1 || true
+      echo "opened http://127.0.0.1:1420/ in the default browser"
+      echo "(Tauri/WebKit is crashing on this host's NVIDIA driver; browser mode bypasses it)"
+      ;;
+    *)
+      die "invalid Q_RESEARCH_UI=$ui_mode (expected tauri|browser)"
+      ;;
+  esac
 
   wait "$UI_PID"
   UI_STATUS=$?
