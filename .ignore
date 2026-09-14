@@ -1,0 +1,8 @@
+# q/.gitignore hides the sibling repos from git. Search tools built on ripgrep
+# (Claude Code, Codex) also honour .gitignore, so re-include the repos here.
+# Each repo's own .gitignore still applies inside it.
+!/q_backend/
+!/q_contracts/
+!/q_core/
+!/q_frontend/
+!/q_terminal/
