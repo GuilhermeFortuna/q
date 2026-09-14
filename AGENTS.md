@@ -14,7 +14,10 @@ small meta-repo; the product code lives in independent git repositories inside i
 | `q_terminal/` | Qt 6 / QML live trading and operations terminal |
 
 - Each repository has its own history, CI, `Makefile` and branches (`development`, `main`,
-  sometimes `staging`). Run git commands inside the repository you are changing.
+  sometimes `staging`). Run git commands inside the repository or worktree you are
+  changing (e.g. `git -C q_backend ...`), never in the `q/` meta-repo itself.
+- `./work` lives at the workspace root. Run it from there, or by its absolute path
+  (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
 - Contracts flow one way: `q_contracts` → consumers pin a commit in `CONTRACTS_REV` and vendor
   generated code. Never hand-edit vendored contract code; verify with `make contracts-check`
   in the consumer.
