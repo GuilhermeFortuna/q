@@ -16,6 +16,10 @@ small meta-repo; the product code lives in independent git repositories inside i
 - Each repository has its own history, CI, `Makefile` and branches (`development`, `main`,
   sometimes `staging`). Run git commands inside the repository or worktree you are
   changing (e.g. `git -C q_backend ...`), never in the `q/` meta-repo itself.
+- Local CI in each child repo automatically enters the host user `ci.slice` (and CI Docker
+  under `ci-docker.slice` when applicable) when those slices exist. Invoke each repo's
+  normal canonical CI command only — do **not** wrap it in `systemd-run`, `ci-run`, or
+  `--cgroup-parent`. Remote CI is unaffected (slices are absent on hosted runners).
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
 - `./research` starts the Research/Backtests stack (containerized `q_backend` +
