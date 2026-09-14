@@ -61,16 +61,19 @@ def parse_task(item: dict) -> Task:
     title = item.get("title", "")
     if content.get("type") != "Issue":
         raise QworkError(f"board item '{title}' is not an issue")
-    return Task(
-        id=title.split()[0],
-        title=title,
-        status=item.get("status") or "",
-        repo_full=content["repository"],
-        issue_number=int(content["number"]),
-        issue_url=content["url"],
-        depends_on=tuple(TASK_ID_IN_TEXT_RE.findall(item.get("depends on") or "")),
-        item_id=item["id"],
-    )
+    try:
+        return Task(
+            id=title.split()[0],
+            title=title,
+            status=item.get("status") or "",
+            repo_full=content["repository"],
+            issue_number=int(content["number"]),
+            issue_url=content["url"],
+            depends_on=tuple(TASK_ID_IN_TEXT_RE.findall(item.get("depends on") or "")),
+            item_id=item["id"],
+        )
+    except KeyError as exc:
+        raise QworkError(f"board item '{title}' is missing field {exc}") from None
 
 
 def check_agent_transition(task: Task, target: str, message: str | None) -> str:
@@ -88,7 +91,11 @@ class Board:
         self._run = runner
 
     def _project_json(self, *args: str) -> dict:
-        return json.loads(self._run(["gh", "project", *args, "--owner", OWNER, "--format", "json"]))
+        command = ["gh", "project", *args, "--owner", OWNER, "--format", "json"]
+        try:
+            return json.loads(self._run(command))
+        except json.JSONDecodeError as exc:
+            raise QworkError(f"`{' '.join(command)}` returned invalid JSON: {exc}") from None
 
     @cached_property
     def _items(self) -> list[dict]:
@@ -105,12 +112,15 @@ class Board:
 
     @cached_property
     def _status_field(self) -> tuple[str, str, dict[str, str]]:
-        project_id = self._project_json("view", str(PROJECT_NUMBER))["id"]
-        fields = self._project_json("field-list", str(PROJECT_NUMBER))["fields"]
-        status = next((f for f in fields if f["name"] == "Status"), None)
-        if status is None:
-            raise QworkError("board has no Status field")
-        return project_id, status["id"], {o["name"]: o["id"] for o in status["options"]}
+        try:
+            project_id = self._project_json("view", str(PROJECT_NUMBER))["id"]
+            fields = self._project_json("field-list", str(PROJECT_NUMBER))["fields"]
+            status = next((f for f in fields if f["name"] == "Status"), None)
+            if status is None:
+                raise QworkError("board has no Status field")
+            return project_id, status["id"], {o["name"]: o["id"] for o in status["options"]}
+        except KeyError as exc:
+            raise QworkError(f"gh project view/field-list response for project {PROJECT_NUMBER} is missing field {exc}") from None
 
     def set_status(self, task: Task, status: str) -> None:
         project_id, field_id, options = self._status_field

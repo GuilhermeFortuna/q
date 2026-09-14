@@ -2,6 +2,7 @@ import pytest
 
 from helpers import FakeRunner, item
 from qwork.board import Board, slugify
+from qwork.cli import main
 from qwork.errors import QworkError
 
 
@@ -70,3 +71,20 @@ def test_board_items_are_listed_once():
     board.task("Q-010")
     board.task("Q-011")
     assert len(fake.gh("gh", "project", "item-list")) == 1
+
+
+def test_item_missing_content_field_is_a_qwork_error():
+    bad = item("Q-010", "Transactional outbox", "Todo")
+    del bad["content"]["number"]
+    with pytest.raises(QworkError, match="Q-010"):
+        Board(FakeRunner([bad])).task("Q-010")
+
+
+def test_malformed_board_item_is_reported_as_one_line(make_ctx):
+    bad = item("Q-010", "Transactional outbox", "Todo")
+    del bad["content"]["number"]
+    ctx, fake = make_ctx([bad])
+    assert main(["board", "show", "Q-010"], ctx) == 1
+    err = ctx.err.getvalue()
+    assert err.startswith("work: ")
+    assert err.count("\n") == 1
