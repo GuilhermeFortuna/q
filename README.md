@@ -144,6 +144,22 @@ Project delivery is tracked in the **[Q GitHub Project Board](https://github.com
 | **`In Review`** | Implementation committed on a local task branch, checks run, awaiting human review and merge. |
 | **`Done`** | Automated tests passing, cross-repo verification clean, acceptance documented. |
 
+### Working with AI agents
+
+Agents are launched from the workspace root with `./work` (requires `uv` and an authenticated `gh`):
+
+```bash
+./work start Q-010 --agent claude              # Todo → In Progress, branch Q-010-…, launch Claude Code
+./work start Q-010 --agent codex --effort high --worktree
+./work start Q-010 --agent cursor --model sonnet-5 --effort high
+./work start Q-010 --agent antigravity --dry-run  # print the prompt, change nothing
+./work board show Q-010
+./work finish Q-010 [--push]                    # In Review → merge --no-ff into development → Done
+```
+
+Agents finish by running `./work board set <ID> in-review -m "…"` (or `blocked`). Task branches
+stay local and are kept after `finish`. Workspace rules for agents live in [`AGENTS.md`](AGENTS.md).
+
 ### Architectural Roadmap
 
 - [x] **Batch 01 — New Repository Foundations:** Bootstrap `q_contracts` (control API, stream envelope, Wine edge contracts, lake manifests, code generators) *(Q-001 → Q-006)*; scaffold the Rust `q_core` workspace *(Q-007)*; scaffold the Qt/QML `q_terminal` application *(Q-008)*.
