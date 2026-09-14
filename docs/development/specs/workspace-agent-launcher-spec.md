@@ -38,7 +38,7 @@ tools/.venv/
 __pycache__/
 ```
 
-Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/`, `q_workspace.code-workspace`,
+Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `q_workspace.code-workspace`,
 `q-workspace/` (symlinks and `.serena/project.yml`), `work`, `tools/`.
 
 ### 1.2 Agent instructions
@@ -50,8 +50,9 @@ Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/`, `q_workspa
   - the board workflow and status rules (section 2.2);
   - agents never push, merge, check out `development`, or close issues;
   - use the `gh` CLI for GitHub operations.
-- `q/CLAUDE.md` and `q/GEMINI.md` each contain only `@AGENTS.md` (Claude Code and
-  Gemini CLI both support `@file` imports). Codex CLI and Cursor CLI read `AGENTS.md` natively.
+- `q/CLAUDE.md` contains only `@AGENTS.md`. Codex CLI, Cursor CLI and Antigravity CLI
+  read `AGENTS.md` natively (Antigravity also references `GEMINI.md`; no `GEMINI.md` is
+  added, to avoid loading instructions twice — confirmed against `agy` during implementation).
 
 ### 1.3 Serena workspace
 
@@ -141,7 +142,7 @@ worktree exist locally.
 Validates the transition (2.2), sets the status, and if `-m` is given posts it as a
 comment on the issue. `blocked` requires `-m`.
 
-### 2.6 `work start <ID> --agent claude|codex|gemini|cursor [--effort E] [--model M] [--worktree] [--dry-run]`
+### 2.6 `work start <ID> --agent claude|codex|cursor|antigravity [--effort E] [--model M] [--worktree] [--dry-run]`
 
 **Arguments**
 
@@ -155,10 +156,10 @@ comment on the issue. `blocked` requires `-m`.
   | claude | `claude` | `low medium high xhigh max` | `--effort E` |
   | codex | `codex` | `minimal low medium high xhigh` | `-c model_reasoning_effort=E` |
   | cursor | `agent` | `low medium high xhigh max` | appended to the model as `--model 'M[effort=E]'`; requires `--model` |
-  | gemini | `gemini` | none | not supported |
+  | antigravity | `agy` | `low medium high` | `--effort E` |
 
-  - An explicitly passed `--effort` that the agent cannot apply (gemini; cursor without
-    `--model`) is an error.
+  - An explicitly passed `--effort` that the agent cannot apply (cursor without `--model`;
+    a value outside the agent's list) is an error.
   - The implicit default is skipped with a one-line notice when it cannot be applied.
 - Without `--worktree`, the task branch is checked out in the repo's main checkout (branch mode).
 
@@ -188,10 +189,10 @@ comment on the issue. `blocked` requires `-m`.
    - claude: `claude [--model M] --effort E <prompt>`
    - codex: `codex [-m M] -c model_reasoning_effort=E <prompt>`
    - cursor: `agent [--model 'M[effort=E]'] <prompt>`
-   - gemini: `gemini [-m M] -i <prompt>` (interactive session seeded with the prompt)
+   - antigravity: `agy [--model M] --effort E -i <prompt>` (interactive session seeded with the prompt)
 
-   Exact flags for gemini and cursor are verified against the installed CLI versions
-   during implementation (Gemini CLI is not yet installed on this machine), and each
+   Flags were read from the installed CLIs (`agy` 1.2.2, Cursor `agent` 2026.09.02) and are
+   re-verified during implementation; each
    agent's command construction is covered by a unit test.
 
 **`--dry-run`** runs the resolution and all preconditions, prints the planned effects
