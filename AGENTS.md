@@ -18,6 +18,11 @@ small meta-repo; the product code lives in independent git repositories inside i
   changing (e.g. `git -C q_backend ...`), never in the `q/` meta-repo itself.
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
+- `./research` starts the Research/Backtests stack (containerized `q_backend` +
+  host Tauri UI) and tears it down on Ctrl+C. Prefer it over manual compose/UI
+  steps when iterating on backtests. Use `./research --rebuild` to force an image
+  rebuild; warm starts reuse `q-backend:dev` when image-defining inputs match.
+  Research requires NVIDIA Container Toolkit and fail-closes if CUDA is unavailable.
 - Contracts flow one way: `q_contracts` → consumers pin a commit in `CONTRACTS_REV` and vendor
   generated code. Never hand-edit vendored contract code; verify with `make contracts-check`
   in the consumer.

@@ -184,19 +184,59 @@ Clone the meta-workspace and initialize sibling repositories:
 git clone https://github.com/GuilhermeFortuna/q_contracts.git
 git clone https://github.com/GuilhermeFortuna/q_backend.git
 git clone https://github.com/GuilhermeFortuna/q_frontend.git
+```
 
+### Research / Backtests (one command)
+
+From the workspace root, with Docker running and NVIDIA Container Toolkit installed:
+
+```bash
+./research              # warm start: reuse q-backend:dev when fingerprint matches
+./research --rebuild    # force one image rebuild
+```
+
+This builds (or reuses) the shared `q-backend:dev` image, fail-closed CUDA-probes the
+worker GPU, brings up containerized Postgres, Redis, API, and Dramatiq worker, points
+the Research UI at the live API (`VITE_ENABLE_MSW=false`), and launches `pnpm tauri:dev`.
+**Ctrl+C** stops the UI and runs `docker compose … down` without deleting volumes,
+images, build cache, or host environments.
+
+Image-defining inputs (any change triggers a rebuild): `Dockerfile`, `pyproject.toml`,
+`uv.lock`, `docker/entrypoint.sh`, and `docker/metatrader5-stub/**`. Application source,
+contracts, and Alembic trees are bind-mounted and do not require a rebuild.
+
+CUDA prerequisites (vendor install guide — do not auto-install privileged packages):
+https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+
+Verify before first GPU Research launch:
+
+```bash
+nvidia-smi
+nvidia-ctk --version
+docker run --rm --gpus all q-backend:dev python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Run only one neural-training job at a time on a single consumer GPU. Native CPU-only
+backend work remains available outside `./research` (`Q_TORCH_DEVICE` defaults to `cpu`).
+
+Host market/lake data is bind-mounted from `q_backend/data/` into the containers.
+
+### Manual (native) backend
+
+```bash
 # Verify contracts suite
 cd q_contracts && make check
 
 # Start the backend services (API + Dramatiq worker)
 cd ../q_backend
 uv sync
-uv run uvicorn api.main:app --reload --port 8000
+uv run uvicorn q_backend.api.main:app --reload --port 8000
+# in another terminal: uv run worker
 
 # Launch the research desktop frontend
 cd ../q_frontend
 pnpm install
-pnpm tauri dev
+pnpm tauri:dev
 ```
 
 ---
