@@ -159,6 +159,7 @@ Agents are launched from the workspace root with `./work` (requires `uv` and an 
 
 Agents finish by running `./work board set <ID> in-review -m "…"` (or `blocked`). Task branches
 stay local and are kept after `finish`. Workspace rules for agents live in [`AGENTS.md`](AGENTS.md).
+Full command reference: [`docs/work-cli.md`](docs/work-cli.md).
 If `./work finish` fails after merging (for example the push is rejected or removing the
 worktree fails), the task stays `In Review`; re-running `./work finish <ID>` is safe. Codex's
 default sandbox will prompt for approval when the agent runs `./work board set`, since it
