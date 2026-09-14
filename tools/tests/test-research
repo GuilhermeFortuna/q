@@ -1,0 +1,554 @@
+#!/usr/bin/env bash
+# Regression harness for ./research image lifecycle and GPU preflight.
+# Uses fake docker/curl/pnpm on PATH; no real Docker, GPU, or network required.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_SRC="${ROOT}/research"
+PASS=0
+FAIL=0
+
+die() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_eq() {
+  local label="$1" expected="$2" actual="$3"
+  if [[ "$expected" != "$actual" ]]; then
+    echo "FAIL: $label (expected='$expected' actual='$actual')" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+assert_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "FAIL: $label (missing '$needle' in: $haystack)" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+assert_not_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "FAIL: $label (unexpected '$needle' in: $haystack)" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+count_log() {
+  local file="$1" pattern="$2"
+  if [[ ! -f "$file" ]]; then
+    echo 0
+    return
+  fi
+  grep -cE "$pattern" "$file" 2>/dev/null || true
+}
+
+setup_workspace() {
+  local ws="$1"
+  mkdir -p \
+    "$ws/bin" \
+    "$ws/q_backend/docker/metatrader5-stub/MetaTrader5" \
+    "$ws/q_backend/src" \
+    "$ws/q_backend/data" \
+    "$ws/q_frontend" \
+    "$ws/state"
+
+  cp "$RESEARCH_SRC" "$ws/research"
+  chmod +x "$ws/research"
+
+  # Minimal image-defining inputs
+  cat >"$ws/q_backend/Dockerfile" <<'EOF'
+FROM scratch
+EOF
+  cat >"$ws/q_backend/pyproject.toml" <<'EOF'
+[project]
+name = "q-backend"
+version = "0.0.0"
+EOF
+  cat >"$ws/q_backend/uv.lock" <<'EOF'
+version = 1
+EOF
+  cat >"$ws/q_backend/docker/entrypoint.sh" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+  cat >"$ws/q_backend/docker/metatrader5-stub/pyproject.toml" <<'EOF'
+[project]
+name = "metatrader5"
+version = "0.0.0"
+EOF
+  cat >"$ws/q_backend/docker/metatrader5-stub/MetaTrader5/__init__.py" <<'EOF'
+# stub
+EOF
+  cat >"$ws/q_backend/src/app.py" <<'EOF'
+# app source
+EOF
+  cat >"$ws/q_backend/docker-compose.yml" <<'EOF'
+services:
+  postgres:
+    image: postgres:16-alpine
+  redis:
+    image: redis:7-alpine
+  backend:
+    profiles: ["containerized"]
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+  worker:
+    profiles: ["containerized"]
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+    environment:
+      Q_TORCH_DEVICE: ${Q_TORCH_DEVICE:-cuda}
+    gpus: all
+EOF
+  mkdir -p "$ws/q_frontend"
+  : >"$ws/q_frontend/.env.example"
+
+  # Fake tooling
+  cat >"$ws/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$ws/bin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+# record and succeed for install / tauri:dev
+echo "pnpm $*" >>"${Q_TEST_STATE}/pnpm.log"
+if [[ "${1:-}" == "tauri:dev" ]]; then
+  sleep 0.05
+fi
+exit 0
+EOF
+  cat >"$ws/bin/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${Q_FAKE_NVIDIA_SMI_FAIL:-0}" == "1" ]]; then
+  echo "nvidia-smi failed" >&2
+  exit 1
+fi
+echo "NVIDIA GeForce RTX 2060"
+exit 0
+EOF
+  cat >"$ws/bin/nvidia-ctk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${Q_FAKE_NVIDIA_CTK_FAIL:-0}" == "1" ]]; then
+  echo "nvidia-ctk missing" >&2
+  exit 1
+fi
+echo "nvidia-ctk ok"
+exit 0
+EOF
+
+  cat >"$ws/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="${Q_TEST_STATE:?}"
+LOG="$STATE/docker.log"
+printf '%s\n' "docker $*" >>"$LOG"
+
+# Persist image labels in STATE/images/<tag>
+images_dir="$STATE/images"
+mkdir -p "$images_dir"
+
+if [[ "${1:-}" == "info" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
+  tag=""
+  format=""
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format)
+        format="$2"
+        shift 2
+        ;;
+      *)
+        tag="$1"
+        shift
+        ;;
+    esac
+  done
+  safe="${tag//\//_}"
+  meta="$images_dir/$safe"
+  if [[ ! -f "$meta" ]]; then
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$meta"
+  if [[ "$format" == *research-fingerprint* ]]; then
+    printf '%s' "${FINGERPRINT:-}"
+  else
+    printf '%s' "${FINGERPRINT:-}"
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "build" ]]; then
+  tag="q-backend:dev"
+  fingerprint="unknown"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tag|-t)
+        tag="$2"
+        shift 2
+        ;;
+      --build-arg)
+        arg="$2"
+        if [[ "$arg" == Q_RESEARCH_IMAGE_FINGERPRINT=* ]]; then
+          fingerprint="${arg#Q_RESEARCH_IMAGE_FINGERPRINT=}"
+        fi
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  safe="${tag//\//_}"
+  {
+    echo "FINGERPRINT=$fingerprint"
+    echo "TAG=$tag"
+  } >"$images_dir/$safe"
+  exit 0
+fi
+
+if [[ "${1:-}" == "compose" ]]; then
+  # Find subcommand after flags
+  sub=""
+  for arg in "$@"; do
+    case "$arg" in
+      up|down|config|ps|logs|version) sub="$arg"; break ;;
+    esac
+  done
+  if [[ "$sub" == "version" ]]; then
+    echo "Docker Compose version 2.0.0"
+    exit 0
+  fi
+  if [[ "$sub" == "up" ]]; then
+    # Refuse --build for warm-path contract
+    for arg in "$@"; do
+      if [[ "$arg" == "--build" ]]; then
+        echo "unexpected --build on compose up" >&2
+        exit 2
+      fi
+    done
+    # Record env-visible image and write a tiny rendered config snapshot
+    {
+      echo "Q_BACKEND_IMAGE=${Q_BACKEND_IMAGE:-}"
+      echo "Q_TORCH_DEVICE=${Q_TORCH_DEVICE:-}"
+    } >>"$STATE/compose_up.env"
+    # Simulate stack running; mark for cleanup checks
+    echo "up" >"$STATE/compose_state"
+    exit 0
+  fi
+  if [[ "$sub" == "down" ]]; then
+    echo "down" >"$STATE/compose_state"
+    # Never prune
+    for arg in "$@"; do
+      if [[ "$arg" == "-v" || "$arg" == "--volumes" || "$arg" == "--rmi" ]]; then
+        echo "cleanup must not remove volumes/images" >&2
+        exit 3
+      fi
+    done
+    exit 0
+  fi
+  if [[ "$sub" == "config" ]]; then
+    cat <<CFG
+services:
+  backend:
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+  worker:
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+    environment:
+      Q_TORCH_DEVICE: ${Q_TORCH_DEVICE:-cuda}
+    gpus: all
+CFG
+    exit 0
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "run" ]]; then
+  # CUDA probe: docker run --rm --gpus all IMAGE python -c ...
+  if [[ "${Q_FAKE_CUDA_PROBE_FAIL:-0}" == "1" ]]; then
+    echo "CUDA probe failed" >&2
+    exit 1
+  fi
+  echo "True NVIDIA GeForce RTX 2060"
+  exit 0
+fi
+
+exit 0
+EOF
+
+  # System tools without host NVIDIA CLIs (so "missing nvidia-*" tests are real).
+  mkdir -p "$ws/sysbin"
+  local cmd
+  for cmd in bash sha256sum find awk timeout sed cat cp mkdir chmod grep sort \
+    mktemp sleep kill printf true false tr cut head tail date uname env basename dirname; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      ln -sfn "$(command -v "$cmd")" "$ws/sysbin/$cmd"
+    fi
+  done
+
+  chmod +x "$ws/bin"/*
+}
+
+test_path() {
+  local ws="$1"
+  echo "$ws/bin:$ws/sysbin"
+}
+
+run_research() {
+  local ws="$1"
+  shift
+  (
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state"
+    export Q_RESEARCH_ROOT="$ws"
+    export PATH
+    PATH="$(test_path "$ws")"
+    # Make UI exit quickly: pnpm tauri:dev returns; research waits on it
+    # Override health wait to be short via env if supported
+    export Q_RESEARCH_HEALTH_URL="http://127.0.0.1:9/health"
+    # GPU tools present by default
+    unset Q_FAKE_NVIDIA_SMI_FAIL Q_FAKE_NVIDIA_CTK_FAIL Q_FAKE_CUDA_PROBE_FAIL || true
+    # shellcheck disable=SC2086
+    timeout 15 "$ws/research" "$@" 2>&1 || true
+  )
+}
+
+source_research_functions() {
+  local ws="$1"
+  # shellcheck disable=SC1091
+  Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_TEST_STATE="$ws/state" \
+    bash -c 'source "'"$ws"'/research"; image_fingerprint; echo'
+}
+
+# --- tests ---
+
+test_missing_image_builds_once() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" >/tmp/research-out.$$ 2>&1 || true
+  assert_eq "missing image builds once" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
+  assert_eq "compose up invoked after build" "1" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+}
+
+test_matching_image_reuses_without_build() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  # Pre-install matching fingerprint image
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws"
+    export PATH
+    PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  : >"$ws/state/docker.log"
+  run_research "$ws" >/dev/null 2>&1 || true
+  assert_eq "warm launch builds zero times" "0" "$(count_log "$ws/state/docker.log" '^docker build ')"
+  assert_not_contains "warm launch has no --build" "--build" "$(cat "$ws/state/docker.log")"
+  assert_not_contains "warm launch has no uv sync" "uv sync" "$(cat "$ws/state/docker.log")"
+  rm -rf "$ws"
+}
+
+test_each_image_input_invalidates() {
+  local input
+  for input in Dockerfile pyproject.toml uv.lock docker/entrypoint.sh docker/metatrader5-stub/MetaTrader5/__init__.py; do
+    local ws
+    ws="$(mktemp -d)"
+    setup_workspace "$ws"
+    (
+      export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+      # shellcheck disable=SC1091
+      source "$ws/research"
+      fp="$(image_fingerprint)"
+      mkdir -p "$ws/state/images"
+      echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+    )
+    echo "changed-$(date +%s%N)" >>"$ws/q_backend/$input"
+    : >"$ws/state/docker.log"
+    run_research "$ws" >/dev/null 2>&1 || true
+    assert_eq "stale $input rebuilds once" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
+    rm -rf "$ws"
+  done
+}
+
+test_source_change_does_not_invalidate() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  echo "source edit" >>"$ws/q_backend/src/app.py"
+  : >"$ws/state/docker.log"
+  run_research "$ws" >/dev/null 2>&1 || true
+  assert_eq "source edit does not rebuild" "0" "$(count_log "$ws/state/docker.log" '^docker build ')"
+  rm -rf "$ws"
+}
+
+test_rebuild_flag_forces_one_build() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  : >"$ws/state/docker.log"
+  run_research "$ws" --rebuild >/dev/null 2>&1 || true
+  assert_eq "--rebuild forces one build" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
+  rm -rf "$ws"
+}
+
+test_gpu_preflight_fails_before_compose_up() {
+  local ws out builds ups
+  # missing nvidia-smi
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  rm -f "$ws/bin/nvidia-smi"
+  out="$(run_research "$ws" 2>&1 || true)"
+  assert_contains "names nvidia-smi missing" "nvidia-smi" "$out"
+  assert_eq "no compose up when nvidia-smi missing" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+
+  # nvidia-smi fails
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_NVIDIA_SMI_FAIL=1
+    timeout 10 "$ws/research" 2>&1 || true
+  )"
+  assert_contains "host GPU failure mentions nvidia-smi" "nvidia-smi" "$out"
+  assert_eq "no compose up when host GPU fails" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+
+  # missing nvidia-ctk
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  rm -f "$ws/bin/nvidia-ctk"
+  out="$(run_research "$ws" 2>&1 || true)"
+  assert_contains "names nvidia-ctk missing" "nvidia-ctk" "$out"
+  assert_eq "no compose up when nvidia-ctk missing" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+
+  # CUDA probe fails after image exists
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_CUDA_PROBE_FAIL=1
+    timeout 10 "$ws/research" 2>&1 || true
+  )"
+  assert_contains "CUDA probe failure is actionable" "CUDA" "$out"
+  assert_eq "no compose up when CUDA probe fails" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+}
+
+test_backend_and_worker_share_image_worker_only_has_gpu() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  run_research "$ws" >/dev/null 2>&1 || true
+  # After up, inspect recorded env
+  assert_contains "shared image env set" "Q_BACKEND_IMAGE=" "$(cat "$ws/state/compose_up.env" 2>/dev/null || true)"
+  local cfg
+  cfg="$(
+    cd "$ws/q_backend"
+    export Q_BACKEND_IMAGE="${Q_RESEARCH_BACKEND_IMAGE:-q-backend:dev}" Q_TORCH_DEVICE=cuda
+    PATH="$(test_path "$ws")" Q_TEST_STATE="$ws/state" docker compose --profile containerized config
+  )"
+  assert_contains "backend uses shared image" "image: q-backend:dev" "$cfg"
+  # worker gpu
+  assert_contains "worker has gpus" "gpus: all" "$cfg"
+  rm -rf "$ws"
+}
+
+test_cleanup_preserves_durable_state() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  mkdir -p "$ws/q_backend/data/lake" "$ws/state/images"
+  echo "FINGERPRINT=keep" >"$ws/state/images/q-backend:dev"
+  echo "precious" >"$ws/q_backend/data/lake/x.parquet"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    CLEANED_UP=0
+    UI_PID=""
+    cleanup
+  )
+  [[ -f "$ws/q_backend/data/lake/x.parquet" ]] || die "data deleted"
+  [[ -f "$ws/state/images/q-backend:dev" ]] || die "image metadata deleted"
+  assert_not_contains "cleanup has no prune" "prune" "$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  assert_not_contains "cleanup has no -v" " --volumes" "$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  assert_eq "data preserved" "precious" "$(cat "$ws/q_backend/data/lake/x.parquet")"
+  rm -rf "$ws"
+}
+
+main() {
+  [[ -x "$RESEARCH_SRC" ]] || die "missing executable $RESEARCH_SRC"
+
+  echo "Running research launcher harness..."
+  test_missing_image_builds_once
+  test_matching_image_reuses_without_build
+  test_each_image_input_invalidates
+  test_source_change_does_not_invalidate
+  test_rebuild_flag_forces_one_build
+  test_gpu_preflight_fails_before_compose_up
+  test_backend_and_worker_share_image_worker_only_has_gpu
+  test_cleanup_preserves_durable_state
+
+  echo
+  echo "passed=$PASS failed=$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+
+main "$@"

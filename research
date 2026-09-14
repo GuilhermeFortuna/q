@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# Start the Research / Backtests stack for local development:
+#   - containerized Postgres, Redis, API, and Dramatiq worker (q_backend)
+#   - Tauri Research UI on the host (q_frontend)
+#
+# Usage (from workspace root):
+#   ./research
+#   ./research --rebuild   # force one backend image rebuild
+#   ./research --help
+#
+# Ctrl+C (or any exit) stops the UI and brings the containers down without
+# deleting named volumes, images, build cache, or host environments.
+
+set -euo pipefail
+
+ROOT="${Q_RESEARCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+BACKEND_DIR="$ROOT/q_backend"
+FRONTEND_DIR="$ROOT/q_frontend"
+COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml")
+API_HEALTH_URL="${Q_RESEARCH_HEALTH_URL:-http://127.0.0.1:8000/api/v1/system/health}"
+BACKEND_IMAGE="${Q_RESEARCH_BACKEND_IMAGE:-q-backend:dev}"
+FINGERPRINT_LABEL="dev.q.backend.research-fingerprint"
+UI_PID=""
+CLEANED_UP=0
+FORCE_REBUILD=0
+STARTED_AT=""
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "'$1' is required but was not found on PATH"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./research [--rebuild] [--help]
+
+  Start the containerized Research backend (Postgres, Redis, API, worker) and
+  the host Tauri Research UI. Ctrl+C tears the stack down and keeps volumes,
+  images, build cache, and host virtual environments.
+
+Options:
+  --rebuild   Rebuild the shared q-backend:dev image even when fingerprints match
+  --help      Show this help
+
+Environment:
+  Q_RESEARCH_BACKEND_IMAGE   Image tag (default: q-backend:dev)
+  Q_RESEARCH_HEALTH_URL      API health URL to poll
+  Q_RESEARCH_ROOT            Workspace root override (tests only)
+
+Image-defining inputs (any change triggers a rebuild):
+  Dockerfile, pyproject.toml, uv.lock, docker/entrypoint.sh,
+  docker/metatrader5-stub/**
+
+Application source under src/, contracts/, alembic/, and docs/ are bind-mounted
+and do not require an image rebuild.
+EOF
+}
+
+parse_args() {
+  FORCE_REBUILD=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --rebuild)
+        FORCE_REBUILD=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1 (try ./research --help)"
+        ;;
+    esac
+  done
+}
+
+# Content hash of image-defining inputs. Paths are sorted; mtimes ignored.
+image_fingerprint() {
+  local backend="$BACKEND_DIR"
+  local -a files=()
+  local f
+
+  [[ -f "$backend/Dockerfile" ]] || die "missing $backend/Dockerfile"
+  [[ -f "$backend/pyproject.toml" ]] || die "missing $backend/pyproject.toml"
+  [[ -f "$backend/uv.lock" ]] || die "missing $backend/uv.lock"
+  [[ -f "$backend/docker/entrypoint.sh" ]] || die "missing $backend/docker/entrypoint.sh"
+
+  files+=(
+    "$backend/Dockerfile"
+    "$backend/pyproject.toml"
+    "$backend/uv.lock"
+    "$backend/docker/entrypoint.sh"
+  )
+
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(find "$backend/docker/metatrader5-stub" -type f -print0 | sort -z)
+
+  (
+    cd "$backend"
+    for f in "${files[@]}"; do
+      rel="${f#"$backend"/}"
+      printf '%s\0' "$rel"
+      # shellcheck disable=SC2002
+      cat "$f"
+      printf '\0'
+    done
+  ) | sha256sum | awk '{print $1}'
+}
+
+installed_fingerprint() {
+  local tag="${1:-$BACKEND_IMAGE}"
+  docker image inspect \
+    --format "{{ index .Config.Labels \"$FINGERPRINT_LABEL\" }}" \
+    "$tag" 2>/dev/null || true
+}
+
+ensure_backend_image() {
+  local fp installed
+  fp="$(image_fingerprint)"
+  installed="$(installed_fingerprint "$BACKEND_IMAGE")"
+
+  if [[ "$FORCE_REBUILD" -eq 1 ]]; then
+    echo "image: forcing rebuild of $BACKEND_IMAGE (fingerprint=$fp)"
+  elif [[ -z "$installed" ]]; then
+    echo "image: $BACKEND_IMAGE missing — building (fingerprint=$fp)"
+  elif [[ "$installed" != "$fp" ]]; then
+    echo "image: $BACKEND_IMAGE stale (have=$installed want=$fp) — rebuilding"
+  else
+    echo "image: reusing $BACKEND_IMAGE (fingerprint=$fp)"
+    return 0
+  fi
+
+  echo "building $BACKEND_IMAGE ..."
+  docker build \
+    --tag "$BACKEND_IMAGE" \
+    --build-arg "Q_RESEARCH_IMAGE_FINGERPRINT=$fp" \
+    -f "$BACKEND_DIR/Dockerfile" \
+    "$BACKEND_DIR"
+  echo "image: built $BACKEND_IMAGE"
+}
+
+check_gpu_prerequisites() {
+  echo "prerequisites: checking Docker, Compose, and NVIDIA GPU access ..."
+
+  need docker
+  need curl
+  need pnpm
+
+  docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (verify: docker info)"
+
+  if ! docker compose version >/dev/null 2>&1; then
+    die "Docker Compose is required (verify: docker compose version)"
+  fi
+
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    die "nvidia-smi not found — install NVIDIA drivers (verify: nvidia-smi)"
+  fi
+  if ! nvidia-smi >/dev/null 2>&1; then
+    die "nvidia-smi failed — host GPU not usable (verify: nvidia-smi)"
+  fi
+
+  if ! command -v nvidia-ctk >/dev/null 2>&1; then
+    die "nvidia-ctk not found — install the NVIDIA Container Toolkit (verify: nvidia-ctk --version; see https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)"
+  fi
+}
+
+check_worker_cuda() {
+  echo "CUDA: probing $BACKEND_IMAGE with --gpus all ..."
+  local out
+  if ! out="$(
+    docker run --rm --gpus all "$BACKEND_IMAGE" \
+      python -c 'import torch; assert torch.cuda.is_available(), "torch.cuda.is_available() is False"; print(torch.cuda.get_device_name(0))'
+  )"; then
+    die "CUDA probe failed for $BACKEND_IMAGE — worker cannot see a GPU (verify: docker run --rm --gpus all $BACKEND_IMAGE python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\")"
+  fi
+  echo "CUDA: ready ($out)"
+}
+
+ensure_frontend_env() {
+  local env_file="$FRONTEND_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    if [[ -f "$FRONTEND_DIR/.env.example" ]]; then
+      cp "$FRONTEND_DIR/.env.example" "$env_file"
+      echo "created $env_file from .env.example"
+    else
+      cat >"$env_file" <<'EOF'
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_ENABLE_MSW=false
+EOF
+      echo "created $env_file"
+    fi
+  fi
+
+  if grep -q '^VITE_ENABLE_MSW=' "$env_file"; then
+    sed -i 's/^VITE_ENABLE_MSW=.*/VITE_ENABLE_MSW=false/' "$env_file"
+  else
+    printf '\nVITE_ENABLE_MSW=false\n' >>"$env_file"
+  fi
+
+  if grep -q '^VITE_API_BASE_URL=' "$env_file"; then
+    sed -i 's|^VITE_API_BASE_URL=.*|VITE_API_BASE_URL=http://127.0.0.1:8000|' "$env_file"
+  else
+    printf 'VITE_API_BASE_URL=http://127.0.0.1:8000\n' >>"$env_file"
+  fi
+}
+
+wait_for_api() {
+  local attempts="${1:-90}"
+  local i
+  local elapsed
+  echo "waiting for API at $API_HEALTH_URL ..."
+  for ((i = 1; i <= attempts; i++)); do
+    if curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
+      elapsed=$((SECONDS - STARTED_AT))
+      echo "API is healthy (backend ready in ${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+  die "API did not become healthy in time (tried ${attempts} times). Check: ${COMPOSE[*]} logs backend"
+}
+
+cleanup() {
+  if [[ "$CLEANED_UP" -eq 1 ]]; then
+    return 0
+  fi
+  CLEANED_UP=1
+
+  echo
+  echo "shutting down Research stack ..."
+
+  if [[ -n "$UI_PID" ]] && kill -0 "$UI_PID" 2>/dev/null; then
+    kill "$UI_PID" 2>/dev/null || true
+    wait "$UI_PID" 2>/dev/null || true
+  fi
+
+  # Stop containerized profile services; keep named volumes, images, and caches.
+  "${COMPOSE[@]}" --profile containerized down --remove-orphans || true
+  echo "Research stack stopped."
+}
+
+main() {
+  parse_args "$@"
+  STARTED_AT=$SECONDS
+
+  check_gpu_prerequisites
+
+  [[ -d "$BACKEND_DIR" ]] || die "missing $BACKEND_DIR"
+  [[ -d "$FRONTEND_DIR" ]] || die "missing $FRONTEND_DIR"
+  [[ -f "$BACKEND_DIR/docker-compose.yml" ]] || die "missing $BACKEND_DIR/docker-compose.yml"
+
+  mkdir -p \
+    "$BACKEND_DIR/data/lake" \
+    "$BACKEND_DIR/data/market" \
+    "$BACKEND_DIR/data/tick_cache"
+
+  ensure_frontend_env
+
+  if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
+    echo "installing frontend dependencies ..."
+    (cd "$FRONTEND_DIR" && pnpm install)
+  fi
+
+  ensure_backend_image
+  check_worker_cuda
+
+  echo "starting Postgres, Redis, API, and worker ..."
+  export Q_BACKEND_IMAGE="$BACKEND_IMAGE"
+  export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
+  export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+  "${COMPOSE[@]}" --profile containerized up -d
+
+  wait_for_api 90
+
+  echo "launching Research UI (Tauri) ..."
+  echo "  API:   $API_HEALTH_URL"
+  echo "  image: $BACKEND_IMAGE"
+  echo "  data:  $BACKEND_DIR/data"
+  echo "  Ctrl+C stops the UI and tears down containers."
+  echo
+
+  (
+    cd "$FRONTEND_DIR"
+    exec pnpm tauri:dev
+  ) &
+  UI_PID=$!
+
+  wait "$UI_PID"
+  UI_STATUS=$?
+  UI_PID=""
+  exit "$UI_STATUS"
+}
+
+# Allow the harness to `source` helpers without running main.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  trap cleanup EXIT INT TERM
+  main "$@"
+fi
