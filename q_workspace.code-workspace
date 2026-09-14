@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"name": "q_contracts",
+			"path": "q_contracts"
+		},
+		{
+			"name": "q_frontend",
+			"path": "q_frontend"
+		},
+		{
+			"name": "q_backend",
+			"path": "q_backend"
+		},
+		{
+			"name": "q_core",
+			"path": "q_core"
+		},
+		{
+			"name": "q_terminal",
+			"path": "q_terminal"
+		},
+		{
+			"name": "docs",
+			"path": "docs"
+		}
+	],
+	"settings": {}
+}

@@ -38,6 +38,9 @@ tools/.venv/
 __pycache__/
 ```
 
+Because ripgrep-based agent search tools honour `.gitignore`, a `q/.ignore` file re-includes
+the five repositories (`!/q_backend/` …); each repository's own `.gitignore` still applies.
+
 Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `q_workspace.code-workspace`,
 `q-workspace/` (symlinks and `.serena/project.yml`), `work`, `tools/`.
 

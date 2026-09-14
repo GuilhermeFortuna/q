@@ -8,3 +8,6 @@
 /q-workspace/.serena/logs/
 tools/.venv/
 __pycache__/
+.pytest_cache/
+/.agents/
+/.codex/
