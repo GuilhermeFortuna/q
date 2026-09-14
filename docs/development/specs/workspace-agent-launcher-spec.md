@@ -38,7 +38,7 @@ tools/.venv/
 __pycache__/
 ```
 
-Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `q_workspace.code-workspace`,
+Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/`, `q_workspace.code-workspace`,
 `q-workspace/` (symlinks and `.serena/project.yml`), `work`, `tools/`.
 
 ### 1.2 Agent instructions
@@ -50,7 +50,8 @@ Tracked: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `q_workspace.code-works
   - the board workflow and status rules (section 2.2);
   - agents never push, merge, check out `development`, or close issues;
   - use the `gh` CLI for GitHub operations.
-- `q/CLAUDE.md` contains only `@AGENTS.md`.
+- `q/CLAUDE.md` and `q/GEMINI.md` each contain only `@AGENTS.md` (Claude Code and
+  Gemini CLI both support `@file` imports). Codex CLI and Cursor CLI read `AGENTS.md` natively.
 
 ### 1.3 Serena workspace
 
@@ -140,13 +141,25 @@ worktree exist locally.
 Validates the transition (2.2), sets the status, and if `-m` is given posts it as a
 comment on the issue. `blocked` requires `-m`.
 
-### 2.6 `work start <ID> --agent claude|codex [--effort E] [--worktree] [--dry-run]`
+### 2.6 `work start <ID> --agent claude|codex|gemini|cursor [--effort E] [--model M] [--worktree] [--dry-run]`
 
 **Arguments**
 
 - `--agent` is required.
-- `--effort` defaults to `medium`. Allowed values: claude `low|medium|high|xhigh|max`;
-  codex `minimal|low|medium|high|xhigh`. Other values are rejected before any side effect.
+- `--model` is optional and passed through to the agent's model flag.
+- `--effort` defaults to `medium`. Support differs per agent; validation happens before
+  any side effect:
+
+  | Agent | Executable | Effort values | How effort is applied |
+  |---|---|---|---|
+  | claude | `claude` | `low medium high xhigh max` | `--effort E` |
+  | codex | `codex` | `minimal low medium high xhigh` | `-c model_reasoning_effort=E` |
+  | cursor | `agent` | `low medium high xhigh max` | appended to the model as `--model 'M[effort=E]'`; requires `--model` |
+  | gemini | `gemini` | none | not supported |
+
+  - An explicitly passed `--effort` that the agent cannot apply (gemini; cursor without
+    `--model`) is an error.
+  - The implicit default is skipped with a one-line notice when it cannot be applied.
 - Without `--worktree`, the task branch is checked out in the repo's main checkout (branch mode).
 
 **Preconditions** (all checked before any side effect)
@@ -172,8 +185,14 @@ comment on the issue. `blocked` requires `-m`.
 3. Render `prompts/implement.md` (2.8).
 4. Set status to `In Progress` (no-op when resuming).
 5. `os.execvp` the agent with the current directory set to `q/`:
-   - claude: `claude --effort <E> <prompt>`
-   - codex: `codex -c model_reasoning_effort=<E> <prompt>`
+   - claude: `claude [--model M] --effort E <prompt>`
+   - codex: `codex [-m M] -c model_reasoning_effort=E <prompt>`
+   - cursor: `agent [--model 'M[effort=E]'] <prompt>`
+   - gemini: `gemini [-m M] -i <prompt>` (interactive session seeded with the prompt)
+
+   Exact flags for gemini and cursor are verified against the installed CLI versions
+   during implementation (Gemini CLI is not yet installed on this machine), and each
+   agent's command construction is covered by a unit test.
 
 **`--dry-run`** runs the resolution and all preconditions, prints the planned effects
 and the rendered prompt, and changes nothing (no branch, worktree, status or launch).
