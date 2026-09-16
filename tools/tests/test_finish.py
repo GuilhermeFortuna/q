@@ -83,3 +83,16 @@ def test_finish_refuses_worktree_with_untracked_files(make_ctx):
     assert main(["finish", "Q-010"], ctx) == 1
     assert "uncommitted or untracked" in ctx.err.getvalue()
     assert fake.status_edits() == []
+
+
+def test_conflict_message_names_the_conflicting_file(make_ctx):
+    ctx, fake, repo, _ = reviewed(make_ctx)
+    write(repo / "README.md", "branch\n")
+    git(repo, "commit", "--quiet", "-am", "branch readme")
+    git(repo, "checkout", "--quiet", "development")
+    write(repo / "README.md", "development\n")
+    git(repo, "commit", "--quiet", "-am", "development readme")
+
+    assert main(["finish", "Q-010"], ctx) == 1
+
+    assert "README.md" in ctx.err.getvalue()

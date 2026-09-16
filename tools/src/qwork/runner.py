@@ -11,11 +11,17 @@ from qwork.errors import QworkError
 
 
 class CommandError(QworkError):
-    def __init__(self, command: Sequence[str], returncode: int, stderr: str) -> None:
+    def __init__(self, command: Sequence[str], returncode: int, stderr: str, stdout: str = "") -> None:
         self.command = list(command)
         self.returncode = returncode
         self.stderr = stderr
-        super().__init__(f"`{' '.join(self.command)}` failed ({returncode}): {stderr.strip()}")
+        self.stdout = stdout
+        super().__init__(f"`{' '.join(self.command)}` failed ({returncode}): {self.detail}")
+
+    @property
+    def detail(self) -> str:
+        """What the command said. Git reports merge conflicts on stdout, not stderr."""
+        return self.stderr.strip() or self.stdout.strip()
 
 
 class Runner(Protocol):
@@ -39,5 +45,5 @@ def run(args: Sequence[str], cwd: Path | None = None) -> str:
     except FileNotFoundError:
         raise QworkError(f"'{args[0]}' is not installed or not on PATH") from None
     if proc.returncode != 0:
-        raise CommandError(args, proc.returncode, proc.stderr)
+        raise CommandError(args, proc.returncode, proc.stderr, proc.stdout)
     return proc.stdout

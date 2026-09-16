@@ -95,7 +95,7 @@ class Git:
                 self._git("merge", "--abort")
             except CommandError:
                 pass
-            raise QworkError(f"merging {branch} failed and was aborted: {exc.stderr.strip()}") from None
+            raise QworkError(f"merging {branch} failed and was aborted:\n{exc.detail}") from None
         return self._git("rev-parse", "HEAD").strip()
 
     def push(self, remote: str, branch: str) -> None:
