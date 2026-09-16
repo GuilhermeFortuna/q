@@ -48,7 +48,28 @@ def make_ctx(workspace, monkeypatch):
             err=io.StringIO(),
             execvp=RecordingExec(),
             which=lambda name: f"/usr/bin/{name}",
+            stream=fake,
         )
         return ctx, fake
 
     return factory
+
+
+@pytest.fixture
+def release_repo(workspace):
+    """A q_core-like repository: RELEASING.md plus Cargo and pyproject versions."""
+    origin = workspace.parent / "q_core-origin.git"
+    repo = workspace / "q_core"
+    git(workspace, "init", "--quiet", "--bare", str(origin))
+    git(workspace, "clone", "--quiet", str(origin), str(repo))
+    write(repo / "RELEASING.md", "# Releasing q_core\n")
+    write(repo / "Cargo.toml", '[workspace.package]\nversion = "2026.9.1"\nedition = "2021"\n')
+    write(repo / "pyproject.toml", '[project]\nname = "q-core"\nversion = "2026.9.1"\n')
+    write(repo / "docs/development/specs/Q-029-tick-kernel-spec.md", "# Q-029 spec\n")
+    write(repo / "docs/development/plans/Q-029-tick-kernel-plan.md", "# Q-029 plan\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "--quiet", "-m", "init")
+    git(repo, "push", "--quiet", "origin", "HEAD:main")
+    git(repo, "checkout", "--quiet", "-b", "development")
+    git(repo, "push", "--quiet", "-u", "origin", "development")
+    return repo

@@ -5,10 +5,11 @@ from __future__ import annotations
 from qwork.board import DONE, IN_REVIEW
 from qwork.context import Context
 from qwork.errors import QworkError
+from qwork.release import is_release_repo, release
 from qwork.repo import Git, worktree_path
 
 
-def finish(ctx: Context, task_id: str, push: bool) -> int:
+def finish(ctx: Context, task_id: str, push: bool, no_push: bool = False) -> int:
     task = ctx.board.task(task_id)
     if task.status != IN_REVIEW:
         raise QworkError(f"{task.id} is '{task.status}'; only '{IN_REVIEW}' tasks can be finished")
@@ -30,11 +31,18 @@ def finish(ctx: Context, task_id: str, push: bool) -> int:
     sha = git.merge_no_ff(task.branch, f"Merge {task.branch} into development")
     if wt.exists():
         git.remove_worktree(wt)
-    if push:
+
+    tag = release(ctx, git, repo_path, task) if is_release_repo(repo_path) else None
+    pushing = (push or tag is not None) and not no_push
+    if pushing:
         git.push("origin", "development")
+    if tag and pushing:
+        git.push_tag("origin", tag)
 
     ctx.board.set_status(task, DONE)
-    pushed = " and pushed" if push else " (not pushed)"
-    ctx.board.close(task, f"Merged `{task.branch}` into `development` as {sha}{pushed}.")
-    print(f"{task.id}: merged {task.branch} into development ({sha[:10]}){pushed}; marked {DONE}", file=ctx.out)
+    pushed = " and pushed" if pushing else " (not pushed)"
+    released = f" Released as `{tag}`." if tag else ""
+    ctx.board.close(task, f"Merged `{task.branch}` into `development` as {sha}{pushed}.{released}")
+    tagged = f", tagged {tag}" if tag else ""
+    print(f"{task.id}: merged {task.branch} into development ({sha[:10]}){pushed}{tagged}; marked {DONE}", file=ctx.out)
     return 0

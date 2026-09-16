@@ -155,6 +155,7 @@ Agents are launched from the workspace root with `./work` (requires `uv` and an 
 ./work start Q-010 --agent antigravity --dry-run  # print the prompt, change nothing
 ./work board show Q-010
 ./work finish Q-010 [--push]                    # In Review → merge --no-ff into development → Done
+./work finish Q-029                             # in q_core, also bumps, checks, tags and pushes the release
 ```
 
 Agents finish by running `./work board set <ID> in-review -m "…"` (or `blocked`). Task branches

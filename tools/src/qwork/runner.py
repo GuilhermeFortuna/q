@@ -22,6 +22,17 @@ class Runner(Protocol):
     def __call__(self, args: Sequence[str], cwd: Path | None = None) -> str: ...
 
 
+def stream(args: Sequence[str], cwd: Path | None = None) -> str:
+    """Run a command with its output attached to this terminal, for long builds."""
+    try:
+        proc = subprocess.run(list(args), cwd=cwd, check=False)
+    except FileNotFoundError:
+        raise QworkError(f"'{args[0]}' is not installed or not on PATH") from None
+    if proc.returncode != 0:
+        raise CommandError(args, proc.returncode, "see the output above")
+    return ""
+
+
 def run(args: Sequence[str], cwd: Path | None = None) -> str:
     try:
         proc = subprocess.run(list(args), cwd=cwd, capture_output=True, text=True, check=False)

@@ -100,3 +100,16 @@ class Git:
 
     def push(self, remote: str, branch: str) -> None:
         self._git("push", "--quiet", remote, branch)
+
+    def commit_paths(self, paths: list[str], message: str) -> None:
+        self._git("add", "--", *paths)
+        self._git("commit", "--quiet", "-m", message)
+
+    def tags(self) -> list[str]:
+        return self._git("tag", "--list").split()
+
+    def tag(self, name: str, message: str) -> None:
+        self._git("tag", "--annotate", "-m", message, name)
+
+    def push_tag(self, remote: str, name: str) -> None:
+        self._git("push", "--quiet", remote, f"refs/tags/{name}")

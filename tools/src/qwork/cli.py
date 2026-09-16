@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     finish = sub.add_parser("finish", help="merge a reviewed task into development and mark it Done")
     finish.add_argument("task_id", metavar="ID")
     finish.add_argument("--push", action="store_true", help="push development to origin after merging")
+    finish.add_argument(
+        "--no-push", action="store_true", help="in a release repo, tag locally without pushing anything"
+    )
 
     board = sub.add_parser("board", help="inspect or update a task on the project board")
     board_sub = board.add_subparsers(dest="board_command", required=True)
@@ -49,7 +52,7 @@ def main(argv: list[str] | None = None, ctx: Context | None = None) -> int:
         if args.command == "finish":
             from qwork.finish import finish
 
-            return finish(ctx, args.task_id, args.push)
+            return finish(ctx, args.task_id, args.push, args.no_push)
         from qwork.commands import board_set, board_show
 
         if args.board_command == "show":

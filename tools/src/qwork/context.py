@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from qwork.board import Board
-from qwork.runner import Runner, run
+from qwork.runner import Runner, run, stream
 
 
 def default_workspace() -> Path:
@@ -24,6 +24,7 @@ class Context:
     workspace: Path
     board: Board
     run: Runner
+    stream: Runner
     out: TextIO
     err: TextIO
     execvp: Callable[[str, list[str], dict[str, str]], object]
@@ -35,6 +36,7 @@ class Context:
             workspace=default_workspace(),
             board=Board(run),
             run=run,
+            stream=stream,
             out=sys.stdout,
             err=sys.stderr,
             execvp=os.execvpe,

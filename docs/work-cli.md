@@ -217,14 +217,18 @@ Merges a reviewed task branch into `development`, removes its worktree if it has
 task `Done`, and closes the issue. **The task branch is kept.**
 
 ```
-./work finish ID [--push]
+./work finish ID [--push] [--no-push]
 ```
 
 
-| Parameter | Required | Default | Description                                  |
-| --------- | -------- | ------- | -------------------------------------------- |
-| `ID`      | yes      | —       | Board task ID                                |
-| `--push`  | no       | off     | Push `development` to `origin` after merging |
+| Parameter   | Required | Default | Description                                             |
+| ----------- | -------- | ------- | ------------------------------------------------------- |
+| `ID`        | yes      | —       | Board task ID                                            |
+| `--push`    | no       | off     | Push `development` to `origin` after merging             |
+| `--no-push` | no       | off     | In a release repository, tag locally and push nothing    |
+
+In a **release repository** — one with a `RELEASING.md`, today only `q_core` — finishing also
+cuts the release, and pushing is implicit because an unpushed tag is one no consumer can pin.
 
 
 
@@ -244,12 +248,21 @@ task `Done`, and closes the issue. **The task branch is kept.**
   **If the merge fails (e.g. a conflict), it is aborted and nothing else happens.** The board
    isn't touched. Resolve it manually, then re-run.
 2. Removes `q/.worktrees/<repo>/<branch>` if it exists.
-3. With `--push`: `git push origin development`.
-4. Sets the task to `Done`.
-5. Closes the issue with a comment naming the branch and merge commit.
+3. In a release repository only (steps 3–5):
+   sets `version` in `Cargo.toml` and `pyproject.toml` to today's date in `YYYY.M.D` form,
+   refreshes `Cargo.lock`, and commits that as `chore(release): bump version to <version>`.
+   Nothing is committed when the version is already today's.
+4. Runs `make check`, with its output on your terminal. **If it fails, nothing is tagged or
+   pushed**, the task stays `In Review`, and the merge stays committed locally.
+5. Tags `vYYYY.MM.DD` (annotated, naming the task), suffixed `.2`, `.3`, … when that day
+   already has a release.
+6. Pushes `development`, then the tag, with `--push` or a release. `--no-push` skips both.
+7. Sets the task to `Done`.
+8. Closes the issue with a comment naming the branch, merge commit, and release tag.
 
-If a later step fails after the merge succeeded (e.g. the push is rejected), the task stays
-`In Review`. Fix the cause and re-run `./work finish <ID>`. The merge step is then a no-op.
+If a later step fails after the merge succeeded (e.g. `make check` fails or the push is
+rejected), the task stays `In Review`. Fix the cause and re-run `./work finish <ID>`. The merge
+and bump steps are then no-ops, so the retry is safe.
 
 ```bash
 ./work finish Q-010           # merge locally, push later yourself

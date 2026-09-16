@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from qwork.runner import run
+from qwork.runner import CommandError, run
 
 STATUS_OPTIONS = ("Blocked", "Todo", "In Progress", "In Review", "Done")
 
@@ -38,12 +38,18 @@ class FakeRunner:
         self.items = list(items)
         self.status_options = status_options
         self.calls: list[list[str]] = []
+        self.failures: list[tuple[str, ...]] = []
 
     def __call__(self, args, cwd=None):
         args = [str(a) for a in args]
         if args[0] == "git":
             return run(args, cwd)
         self.calls.append(args)
+        if args[0] != "gh":
+            for failing in self.failures:
+                if args[: len(failing)] == list(failing):
+                    raise CommandError(args, 2, f"{' '.join(args)} failed")
+            return ""
         head = args[:3]
         if head == ["gh", "project", "item-list"]:
             return json.dumps({"items": self.items, "totalCount": len(self.items)})
@@ -67,6 +73,9 @@ class FakeRunner:
         if head in (["gh", "project", "item-edit"], ["gh", "issue", "comment"], ["gh", "issue", "close"]):
             return ""
         raise AssertionError(f"unexpected command: {args}")
+
+    def ran(self, *prefix: str) -> list[list[str]]:
+        return [c for c in self.calls if c[: len(prefix)] == list(prefix)]
 
     def gh(self, *prefix: str) -> list[list[str]]:
         return [c for c in self.calls if c[: len(prefix)] == list(prefix)]
