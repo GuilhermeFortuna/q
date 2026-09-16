@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# Start the Research / Backtests stack for local development:
-#   - containerized Postgres, Redis, API, and Dramatiq worker (q_backend)
-#   - Tauri Research UI on the host (q_frontend)
+# Start the Research / Backtests stack for local development.
+#
+# Two modes:
+#   host      (default) Postgres + Redis in containers; API and Dramatiq worker
+#             run from q_backend/.venv on the host. No backend image is built,
+#             so nothing is downloaded, exported, or cached a second time.
+#   container Postgres, Redis, API and worker all in containers, using the
+#             shared q-backend:dev image (the pre-Q-033 behaviour).
+#
+# The host mode exists because the containerized path stores the CUDA PyTorch
+# stack (~4.6 GB of torch + nvidia + triton) a third and fourth time: once in
+# the backend image and again in the BuildKit cache, on top of the copies that
+# already live in q_backend/.venv and ~/.cache/uv. On a development machine
+# that is roughly 13 GB of avoidable disk per cold build.
 #
 # Usage (from workspace root):
 #   ./research
-#   ./research --rebuild   # force one backend image rebuild
+#   ./research --container             # containerized backend + worker
+#   ./research --container --rebuild   # force one backend image rebuild
 #   ./research --help
 #
-# Ctrl+C (or any exit) stops the UI and brings the containers down without
-# deleting named volumes, images, build cache, or host environments.
+# Ctrl+C (or any exit) stops the UI and the backend processes and brings the
+# containers down without deleting named volumes, images, or host environments.
 
 set -euo pipefail
 
@@ -20,10 +32,18 @@ COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/dock
 API_HEALTH_URL="${Q_RESEARCH_HEALTH_URL:-http://127.0.0.1:8000/api/v1/system/health}"
 BACKEND_IMAGE="${Q_RESEARCH_BACKEND_IMAGE:-q-backend:dev}"
 FINGERPRINT_LABEL="dev.q.backend.research-fingerprint"
+# Upper bound on retained BuildKit cache, applied after a container-mode build.
+# Bounded pruning only drops cache beyond the cap; it never touches images,
+# containers, or named volumes.
+BUILD_CACHE_MAX="${Q_RESEARCH_BUILD_CACHE_MAX:-4GB}"
+MODE="${Q_RESEARCH_MODE:-host}"
 UI_PID=""
+API_PID=""
+WORKER_PID=""
 CLEANED_UP=0
 FORCE_REBUILD=0
 STARTED_AT=""
+LOG_DIR=""
 
 die() {
   echo "error: $*" >&2
@@ -36,25 +56,35 @@ need() {
 
 usage() {
   cat <<'EOF'
-Usage: ./research [--rebuild] [--help]
+Usage: ./research [--host | --container] [--rebuild] [--help]
 
-  Start the containerized Research backend (Postgres, Redis, API, worker) and
-  the host Tauri Research UI. Ctrl+C tears the stack down and keeps volumes,
-  images, build cache, and host virtual environments.
+  Start the Research backend and the host Tauri Research UI. Ctrl+C tears the
+  stack down and keeps volumes, images, build cache, and host environments.
+
+Modes:
+  --host       (default) Postgres and Redis in containers; API and Dramatiq
+               worker run from q_backend/.venv on the host. No backend image is
+               built or exported, and torch talks to the GPU directly, so the
+               NVIDIA Container Toolkit is not required.
+  --container  API and worker in containers on the shared q-backend:dev image.
+               Requires the NVIDIA Container Toolkit. Costs ~6 GB of image plus
+               BuildKit cache on the first build.
 
 Options:
-  --rebuild   Rebuild the shared q-backend:dev image even when fingerprints match
+  --rebuild   Rebuild q-backend:dev even when fingerprints match (container mode)
   --help      Show this help
 
 Environment:
-  Q_RESEARCH_BACKEND_IMAGE   Image tag (default: q-backend:dev)
-  Q_RESEARCH_HEALTH_URL      API health URL to poll
-  Q_RESEARCH_ROOT            Workspace root override (tests only)
-  Q_RESEARCH_UI              tauri (default) | browser
-                             Use browser when the Tauri/WebKit shell crashes on
-                             NVIDIA+Wayland (opens http://localhost:1420).
+  Q_RESEARCH_MODE             host (default) | container
+  Q_RESEARCH_BACKEND_IMAGE    Image tag for container mode (default: q-backend:dev)
+  Q_RESEARCH_BUILD_CACHE_MAX  BuildKit cache cap applied after a build (default: 4GB)
+  Q_RESEARCH_HEALTH_URL       API health URL to poll
+  Q_RESEARCH_ROOT             Workspace root override (tests only)
+  Q_RESEARCH_UI               tauri (default) | browser
+                              Use browser when the Tauri/WebKit shell crashes on
+                              NVIDIA+Wayland (opens http://localhost:1420).
 
-Image-defining inputs (any change triggers a rebuild):
+Container-mode image-defining inputs (any change triggers a rebuild):
   Dockerfile, pyproject.toml, uv.lock, docker/entrypoint.sh,
   docker/metatrader5-stub/**
 
@@ -67,6 +97,14 @@ parse_args() {
   FORCE_REBUILD=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --host)
+        MODE=host
+        shift
+        ;;
+      --container|--containerized)
+        MODE=container
+        shift
+        ;;
       --rebuild)
         FORCE_REBUILD=1
         shift
@@ -80,6 +118,11 @@ parse_args() {
         ;;
     esac
   done
+
+  case "$MODE" in
+    host|container) ;;
+    *) die "invalid mode '$MODE' (expected host|container)" ;;
+  esac
 }
 
 # Content hash of image-defining inputs. Paths are sorted; mtimes ignored.
@@ -123,6 +166,27 @@ installed_fingerprint() {
     "$tag" 2>/dev/null || true
 }
 
+# Cap retained BuildKit cache. Bounded, never unconditional: it drops only the
+# cache beyond BUILD_CACHE_MAX and leaves images, containers and volumes alone.
+cap_build_cache() {
+  local max="$BUILD_CACHE_MAX"
+
+  if [[ "$max" == "off" || -z "$max" ]]; then
+    echo "cache: build-cache cap disabled (Q_RESEARCH_BUILD_CACHE_MAX=off)"
+    return 0
+  fi
+
+  echo "cache: capping BuildKit cache at $max ..."
+  if docker builder prune --force --max-used-space "$max" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Docker < 28 spells the same bound --keep-storage.
+  if docker builder prune --force --keep-storage "$max" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "cache: could not cap build cache (non-fatal); check 'docker system df'" >&2
+}
+
 ensure_backend_image() {
   local fp installed
   fp="$(image_fingerprint)"
@@ -146,11 +210,10 @@ ensure_backend_image() {
     -f "$BACKEND_DIR/Dockerfile" \
     "$BACKEND_DIR"
   echo "image: built $BACKEND_IMAGE"
+  cap_build_cache
 }
 
-check_gpu_prerequisites() {
-  echo "prerequisites: checking Docker, Compose, and NVIDIA GPU access ..."
-
+check_common_prerequisites() {
   need docker
   need curl
   need pnpm
@@ -167,10 +230,21 @@ check_gpu_prerequisites() {
   if ! nvidia-smi >/dev/null 2>&1; then
     die "nvidia-smi failed — host GPU not usable (verify: nvidia-smi)"
   fi
+}
+
+check_container_prerequisites() {
+  echo "prerequisites: checking Docker, Compose, and NVIDIA GPU access ..."
+  check_common_prerequisites
 
   if ! command -v nvidia-ctk >/dev/null 2>&1; then
     die "nvidia-ctk not found — install the NVIDIA Container Toolkit (verify: nvidia-ctk --version; see https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)"
   fi
+}
+
+check_host_prerequisites() {
+  echo "prerequisites: checking Docker, Compose, uv, and host GPU access ..."
+  check_common_prerequisites
+  need uv
 }
 
 check_worker_cuda() {
@@ -185,6 +259,123 @@ check_worker_cuda() {
     die "CUDA probe failed for $BACKEND_IMAGE — worker cannot see a GPU (verify: docker run --rm --gpus all --entrypoint python $BACKEND_IMAGE -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\")"
   fi
   echo "CUDA: ready ($out)"
+}
+
+venv_python() {
+  printf '%s' "$BACKEND_DIR/.venv/bin/python"
+}
+
+ensure_backend_venv() {
+  echo "venv: syncing $BACKEND_DIR/.venv ..."
+  # Idempotent and fast when already in sync. --frozen refuses to move uv.lock,
+  # so the host environment matches the pinned dependency set exactly.
+  (cd "$BACKEND_DIR" && uv sync --frozen) \
+    || die "uv sync failed in $BACKEND_DIR (verify: cd q_backend && uv sync --frozen)"
+  [[ -x "$(venv_python)" ]] || die "missing interpreter $(venv_python) after uv sync"
+}
+
+check_host_cuda() {
+  echo "CUDA: probing host interpreter $(venv_python) ..."
+  local out
+  if ! out="$(
+    "$(venv_python)" \
+      -c 'import torch; assert torch.cuda.is_available(), "torch.cuda.is_available() is False"; print(torch.cuda.get_device_name(0))'
+  )"; then
+    die "CUDA probe failed for the host venv — torch cannot see a GPU (verify: q_backend/.venv/bin/python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\")"
+  fi
+  echo "CUDA: ready ($out)"
+}
+
+# Environment shared by the host API and worker processes. Mirrors the
+# container-mode environment block in docker-compose.yml, with the published
+# host ports and absolute data roots.
+export_host_backend_env() {
+  export Q_DATABASE_URL="${Q_DATABASE_URL:-postgresql+psycopg://q:q@127.0.0.1:5434/q}"
+  export Q_REDIS_URL="${Q_REDIS_URL:-redis://127.0.0.1:6380/0}"
+  export Q_DATA_LAKE_ROOT="${Q_DATA_LAKE_ROOT:-$BACKEND_DIR/data/lake}"
+  export Q_MARKET_DATA_ROOT="${Q_MARKET_DATA_ROOT:-$BACKEND_DIR/data/market}"
+  export Q_TICK_CACHE_DIR="${Q_TICK_CACHE_DIR:-$BACKEND_DIR/data/tick_cache}"
+  export Q_RUNTIME_CONFIG_PATH="${Q_RUNTIME_CONFIG_PATH:-$BACKEND_DIR/data/runtime_config.json}"
+  export Q_WORKER_PROCESSES="${Q_WORKER_PROCESSES:-14}"
+  export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
+  export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+}
+
+run_host_migrations() {
+  echo "migrations: alembic upgrade head ..."
+  (cd "$BACKEND_DIR" && "$BACKEND_DIR/.venv/bin/alembic" upgrade head) \
+    || die "alembic upgrade head failed (verify: cd q_backend && .venv/bin/alembic upgrade head)"
+}
+
+# Start a host backend process in its own session so cleanup can signal the
+# whole process group — the Dramatiq pool forks Q_WORKER_PROCESSES children and
+# uvicorn reloads into children of its own.
+#
+# The launched process reports its own pid rather than us trusting $!: bash may
+# put an extra short-lived fork between the script and the target, and after
+# setsid the reported pid is also the new session's process-group id, which is
+# what cleanup has to signal.
+start_host_process() {
+  local name="$1"
+  shift
+  local log="$LOG_DIR/$name.log"
+  local pidfile="$LOG_DIR/$name.pid"
+  local pid="" i
+
+  rm -f "$pidfile"
+  (
+    cd "$BACKEND_DIR"
+    exec setsid bash -c 'echo "$$" >"$1"; shift; exec "$@"' _ "$pidfile" "$@"
+  ) >"$log" 2>&1 &
+
+  for ((i = 0; i < 100; i++)); do
+    if [[ -s "$pidfile" ]]; then
+      pid="$(cat "$pidfile")"
+      break
+    fi
+    sleep 0.1
+  done
+  [[ -n "$pid" ]] || die "$name did not start within 10s (check $log)"
+  printf '%s' "$pid"
+}
+
+stop_host_process() {
+  local pid="$1" name="$2" i
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  # A negative pid signals the whole process group, so the worker pool's
+  # children go down with their master instead of being orphaned.
+  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for ((i = 0; i < 100; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "stopped $name"
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  echo "stopped $name (forced after 10s)"
+}
+
+wait_for_api() {
+  local attempts="${1:-90}"
+  local i
+  local elapsed
+  echo "waiting for API at $API_HEALTH_URL ..."
+  for ((i = 1; i <= attempts; i++)); do
+    if curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
+      elapsed=$((SECONDS - STARTED_AT))
+      echo "API is healthy (backend ready in ${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+  if [[ "$MODE" == "host" ]]; then
+    die "API did not become healthy in time (tried ${attempts} times). Check: $LOG_DIR/api.log"
+  fi
+  die "API did not become healthy in time (tried ${attempts} times). Check: ${COMPOSE[*]} logs backend"
 }
 
 ensure_frontend_env() {
@@ -215,22 +406,6 @@ EOF
   fi
 }
 
-wait_for_api() {
-  local attempts="${1:-90}"
-  local i
-  local elapsed
-  echo "waiting for API at $API_HEALTH_URL ..."
-  for ((i = 1; i <= attempts; i++)); do
-    if curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
-      elapsed=$((SECONDS - STARTED_AT))
-      echo "API is healthy (backend ready in ${elapsed}s)"
-      return 0
-    fi
-    sleep 2
-  done
-  die "API did not become healthy in time (tried ${attempts} times). Check: ${COMPOSE[*]} logs backend"
-}
-
 cleanup() {
   if [[ "$CLEANED_UP" -eq 1 ]]; then
     return 0
@@ -245,48 +420,25 @@ cleanup() {
     wait "$UI_PID" 2>/dev/null || true
   fi
 
+  stop_host_process "$WORKER_PID" "worker"
+  stop_host_process "$API_PID" "API"
+
   # Stop containerized profile services; keep named volumes, images, and caches.
   "${COMPOSE[@]}" --profile containerized down --remove-orphans || true
   echo "Research stack stopped."
 }
 
-main() {
-  parse_args "$@"
-  STARTED_AT=$SECONDS
-
-  check_gpu_prerequisites
-
-  [[ -d "$BACKEND_DIR" ]] || die "missing $BACKEND_DIR"
-  [[ -d "$FRONTEND_DIR" ]] || die "missing $FRONTEND_DIR"
-  [[ -f "$BACKEND_DIR/docker-compose.yml" ]] || die "missing $BACKEND_DIR/docker-compose.yml"
-
-  mkdir -p \
-    "$BACKEND_DIR/data/lake" \
-    "$BACKEND_DIR/data/market" \
-    "$BACKEND_DIR/data/tick_cache"
-
-  ensure_frontend_env
-
-  if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
-    echo "installing frontend dependencies ..."
-    (cd "$FRONTEND_DIR" && pnpm install)
-  fi
-
-  ensure_backend_image
-  check_worker_cuda
-
-  echo "starting Postgres, Redis, API, and worker ..."
-  export Q_BACKEND_IMAGE="$BACKEND_IMAGE"
-  export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
-  export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
-  "${COMPOSE[@]}" --profile containerized up -d
-
-  wait_for_api 90
-
+launch_ui() {
   local ui_mode="${Q_RESEARCH_UI:-tauri}"
   echo "launching Research UI ($ui_mode) ..."
+  echo "  mode:  $MODE"
   echo "  API:   $API_HEALTH_URL"
-  echo "  image: $BACKEND_IMAGE"
+  if [[ "$MODE" == "container" ]]; then
+    echo "  image: $BACKEND_IMAGE"
+  else
+    echo "  venv:  $BACKEND_DIR/.venv"
+    echo "  logs:  $LOG_DIR"
+  fi
   echo "  data:  $BACKEND_DIR/data"
   echo "  Ctrl+C stops the UI and tears down containers."
   echo
@@ -321,6 +473,65 @@ main() {
       die "invalid Q_RESEARCH_UI=$ui_mode (expected tauri|browser)"
       ;;
   esac
+}
+
+main() {
+  parse_args "$@"
+  STARTED_AT=$SECONDS
+
+  if [[ "$MODE" == "container" ]]; then
+    check_container_prerequisites
+  else
+    check_host_prerequisites
+  fi
+
+  [[ -d "$BACKEND_DIR" ]] || die "missing $BACKEND_DIR"
+  [[ -d "$FRONTEND_DIR" ]] || die "missing $FRONTEND_DIR"
+  [[ -f "$BACKEND_DIR/docker-compose.yml" ]] || die "missing $BACKEND_DIR/docker-compose.yml"
+
+  mkdir -p \
+    "$BACKEND_DIR/data/lake" \
+    "$BACKEND_DIR/data/market" \
+    "$BACKEND_DIR/data/tick_cache"
+
+  ensure_frontend_env
+
+  if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
+    echo "installing frontend dependencies ..."
+    (cd "$FRONTEND_DIR" && pnpm install)
+  fi
+
+  if [[ "$MODE" == "container" ]]; then
+    ensure_backend_image
+    check_worker_cuda
+
+    echo "starting Postgres, Redis, API, and worker ..."
+    export Q_BACKEND_IMAGE="$BACKEND_IMAGE"
+    export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
+    export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+    "${COMPOSE[@]}" --profile containerized up -d
+  else
+    ensure_backend_venv
+    check_host_cuda
+    export_host_backend_env
+
+    LOG_DIR="$BACKEND_DIR/data/logs"
+    mkdir -p "$LOG_DIR"
+
+    echo "starting Postgres and Redis ..."
+    "${COMPOSE[@]}" up -d --wait postgres redis
+
+    run_host_migrations
+
+    echo "starting host API and Dramatiq worker ..."
+    API_PID="$(start_host_process api "$BACKEND_DIR/.venv/bin/uvicorn" \
+      q_backend.api.main:app --host 127.0.0.1 --port 8000)"
+    WORKER_PID="$(start_host_process worker "$BACKEND_DIR/.venv/bin/worker")"
+  fi
+
+  wait_for_api 90
+
+  launch_ui
 
   wait "$UI_PID"
   UI_STATUS=$?

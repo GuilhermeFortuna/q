@@ -189,22 +189,50 @@ git clone https://github.com/GuilhermeFortuna/q_frontend.git
 
 ### Research / Backtests (one command)
 
-From the workspace root, with Docker running and NVIDIA Container Toolkit installed:
+From the workspace root, with Docker running and an NVIDIA GPU available:
 
 ```bash
-./research              # warm start: reuse q-backend:dev when fingerprint matches
-./research --rebuild    # force one image rebuild
+./research                          # host mode (default)
+./research --container              # containerized API + worker
+./research --container --rebuild    # force one image rebuild
 ```
 
-This builds (or reuses) the shared `q-backend:dev` image, fail-closed CUDA-probes the
-worker GPU, brings up containerized Postgres, Redis, API, and Dramatiq worker, points
-the Research UI at the live API (`VITE_ENABLE_MSW=false`), and launches `pnpm tauri:dev`.
-**Ctrl+C** stops the UI and runs `docker compose … down` without deleting volumes,
-images, build cache, or host environments.
+Both modes fail-closed CUDA-probe before anything starts, point the Research UI at the
+live API (`VITE_ENABLE_MSW=false`), and launch `pnpm tauri:dev`. **Ctrl+C** stops the UI
+and the backend and runs `docker compose … down` without deleting volumes, images, build
+cache, or host environments.
 
-Image-defining inputs (any change triggers a rebuild): `Dockerfile`, `pyproject.toml`,
-`uv.lock`, `docker/entrypoint.sh`, and `docker/metatrader5-stub/**`. Application source,
-contracts, and Alembic trees are bind-mounted and do not require a rebuild.
+#### Host mode (default)
+
+Containerizes Postgres and Redis only. The API and Dramatiq worker run from
+`q_backend/.venv` (`uv sync --frozen`, then `alembic upgrade head`), and torch talks to
+the GPU directly, so the **NVIDIA Container Toolkit is not required**. No backend image
+is built or exported and no packages are downloaded when the venv is already in sync, so
+a warm start is effectively instant.
+
+This is the default because the containerized path stores the CUDA PyTorch stack
+(~4.6 GB of `torch` + `nvidia` + `triton`) a third and fourth time — once in the backend
+image and again in the BuildKit cache — on top of the copies already in
+`q_backend/.venv` and `~/.cache/uv`. That is roughly 13 GB of avoidable disk per cold
+build.
+
+#### Container mode (`--container`)
+
+API and worker run in containers on the shared `q-backend:dev` image. Requires the
+NVIDIA Container Toolkit. Image-defining inputs (any change triggers a rebuild):
+`Dockerfile`, `pyproject.toml`, `uv.lock`, `docker/entrypoint.sh`, and
+`docker/metatrader5-stub/**`. Application source, contracts, and Alembic trees are
+bind-mounted and do not require a rebuild.
+
+After a build the launcher caps retained BuildKit cache at
+`Q_RESEARCH_BUILD_CACHE_MAX` (default `4GB`; set `off` to disable). The prune is bounded
+— it drops only cache beyond the cap and never touches images, containers, or named
+volumes. To apply the same bound to every build on the machine, not just `./research`,
+add a builder GC policy to `/etc/docker/daemon.json` and restart Docker:
+
+```json
+{ "builder": { "gc": { "enabled": true, "defaultKeepStorage": "4GB" } } }
+```
 
 CUDA prerequisites (vendor install guide — do not auto-install privileged packages):
 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
@@ -213,6 +241,12 @@ Verify before first GPU Research launch:
 
 ```bash
 nvidia-smi
+q_backend/.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Container mode additionally needs:
+
+```bash
 nvidia-ctk --version
 docker run --rm --gpus all q-backend:dev python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
@@ -220,7 +254,9 @@ docker run --rm --gpus all q-backend:dev python -c "import torch; print(torch.cu
 Run only one neural-training job at a time on a single consumer GPU. Native CPU-only
 backend work remains available outside `./research` (`Q_TORCH_DEVICE` defaults to `cpu`).
 
-Host market/lake data is bind-mounted from `q_backend/data/` into the containers.
+Host market/lake data lives in `q_backend/data/` — read directly in host mode, and
+bind-mounted into the containers in container mode, so both modes share it.
+Host-mode API and worker logs are written to `q_backend/data/logs/`.
 
 ### Manual (native) backend
 

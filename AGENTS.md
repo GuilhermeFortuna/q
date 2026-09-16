@@ -22,11 +22,20 @@ small meta-repo; the product code lives in independent git repositories inside i
   `--cgroup-parent`. Remote CI is unaffected (slices are absent on hosted runners).
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
-- `./research` starts the Research/Backtests stack (containerized `q_backend` +
-  host Tauri UI) and tears it down on Ctrl+C. Prefer it over manual compose/UI
-  steps when iterating on backtests. Use `./research --rebuild` to force an image
-  rebuild; warm starts reuse `q-backend:dev` when image-defining inputs match.
-  Research requires NVIDIA Container Toolkit and fail-closes if CUDA is unavailable.
+- `./research` starts the Research/Backtests stack and tears it down on Ctrl+C.
+  Prefer it over manual compose/UI steps when iterating on backtests. It
+  fail-closes if CUDA is unavailable.
+  - Default (`--host`): containerized Postgres and Redis only; the API and
+    Dramatiq worker run from `q_backend/.venv`, and torch uses the host GPU
+    directly. Nothing is built, exported, or downloaded — the NVIDIA Container
+    Toolkit is not required.
+  - `--container`: API and worker in containers on the shared `q-backend:dev`
+    image; warm starts reuse it when image-defining inputs match, and
+    `--rebuild` forces one rebuild. Requires the NVIDIA Container Toolkit and
+    costs roughly 6 GB of image plus BuildKit cache on a first build. After a
+    build the launcher caps retained BuildKit cache at
+    `Q_RESEARCH_BUILD_CACHE_MAX` (default `4GB`); `off` disables the cap. That
+    bounded prune never touches images, containers, or named volumes.
 - Contracts flow one way: `q_contracts` → consumers pin a commit in `CONTRACTS_REV` and vendor
   generated code. Never hand-edit vendored contract code; verify with `make contracts-check`
   in the consumer.

@@ -147,6 +147,45 @@ echo "nvidia-ctk ok"
 exit 0
 EOF
 
+  cat >"$ws/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+echo "uv $*" >>"${Q_TEST_STATE}/uv.log"
+exit 0
+EOF
+
+  # Host-mode virtualenv: torch probe, migrations, API and worker entry points.
+  mkdir -p "$ws/q_backend/.venv/bin"
+  cat >"$ws/q_backend/.venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+echo "venv-python $*" >>"${Q_TEST_STATE}/host.log"
+if [[ "${Q_FAKE_CUDA_PROBE_FAIL:-0}" == "1" ]]; then
+  echo "torch.cuda.is_available() is False" >&2
+  exit 1
+fi
+echo "NVIDIA GeForce RTX 2060"
+exit 0
+EOF
+  cat >"$ws/q_backend/.venv/bin/alembic" <<'EOF'
+#!/usr/bin/env bash
+echo "alembic $*" >>"${Q_TEST_STATE}/host.log"
+if [[ "${Q_FAKE_ALEMBIC_FAIL:-0}" == "1" ]]; then
+  echo "migration failed" >&2
+  exit 1
+fi
+exit 0
+EOF
+  cat >"$ws/q_backend/.venv/bin/uvicorn" <<'EOF'
+#!/usr/bin/env bash
+echo "uvicorn $*" >>"${Q_TEST_STATE}/host.log"
+sleep 5
+EOF
+  cat >"$ws/q_backend/.venv/bin/worker" <<'EOF'
+#!/usr/bin/env bash
+echo "worker $*" >>"${Q_TEST_STATE}/host.log"
+sleep 5
+EOF
+  chmod +x "$ws/q_backend/.venv/bin"/*
+
   cat >"$ws/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -296,7 +335,8 @@ EOF
   mkdir -p "$ws/sysbin"
   local cmd
   for cmd in bash sha256sum find awk timeout sed cat cp mkdir chmod grep sort \
-    mktemp sleep kill printf true false tr cut head tail date uname env basename dirname; do
+    mktemp sleep kill printf true false tr cut head tail date uname env basename dirname \
+    setsid rm ln tee; do
     if command -v "$cmd" >/dev/null 2>&1; then
       ln -sfn "$(command -v "$cmd")" "$ws/sysbin/$cmd"
     fi
@@ -342,7 +382,7 @@ test_missing_image_builds_once() {
   local ws
   ws="$(mktemp -d)"
   setup_workspace "$ws"
-  run_research "$ws" >/tmp/research-out.$$ 2>&1 || true
+  run_research "$ws" --container >/tmp/research-out.$$ 2>&1 || true
   assert_eq "missing image builds once" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
   assert_eq "compose up invoked after build" "1" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
   rm -rf "$ws"
@@ -364,7 +404,7 @@ test_matching_image_reuses_without_build() {
     echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
   )
   : >"$ws/state/docker.log"
-  run_research "$ws" >/dev/null 2>&1 || true
+  run_research "$ws" --container >/dev/null 2>&1 || true
   assert_eq "warm launch builds zero times" "0" "$(count_log "$ws/state/docker.log" '^docker build ')"
   assert_not_contains "warm launch has no --build" "--build" "$(cat "$ws/state/docker.log")"
   assert_not_contains "warm launch has no uv sync" "uv sync" "$(cat "$ws/state/docker.log")"
@@ -387,7 +427,7 @@ test_each_image_input_invalidates() {
     )
     echo "changed-$(date +%s%N)" >>"$ws/q_backend/$input"
     : >"$ws/state/docker.log"
-    run_research "$ws" >/dev/null 2>&1 || true
+    run_research "$ws" --container >/dev/null 2>&1 || true
     assert_eq "stale $input rebuilds once" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
     rm -rf "$ws"
   done
@@ -407,7 +447,7 @@ test_source_change_does_not_invalidate() {
   )
   echo "source edit" >>"$ws/q_backend/src/app.py"
   : >"$ws/state/docker.log"
-  run_research "$ws" >/dev/null 2>&1 || true
+  run_research "$ws" --container >/dev/null 2>&1 || true
   assert_eq "source edit does not rebuild" "0" "$(count_log "$ws/state/docker.log" '^docker build ')"
   rm -rf "$ws"
 }
@@ -425,7 +465,7 @@ test_rebuild_flag_forces_one_build() {
     echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
   )
   : >"$ws/state/docker.log"
-  run_research "$ws" --rebuild >/dev/null 2>&1 || true
+  run_research "$ws" --container --rebuild >/dev/null 2>&1 || true
   assert_eq "--rebuild forces one build" "1" "$(count_log "$ws/state/docker.log" '^docker build ')"
   rm -rf "$ws"
 }
@@ -436,7 +476,7 @@ test_gpu_preflight_fails_before_compose_up() {
   ws="$(mktemp -d)"
   setup_workspace "$ws"
   rm -f "$ws/bin/nvidia-smi"
-  out="$(run_research "$ws" 2>&1 || true)"
+  out="$(run_research "$ws" --container 2>&1 || true)"
   assert_contains "names nvidia-smi missing" "nvidia-smi" "$out"
   assert_eq "no compose up when nvidia-smi missing" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
   rm -rf "$ws"
@@ -447,7 +487,7 @@ test_gpu_preflight_fails_before_compose_up() {
   out="$(
     cd "$ws"
     export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_NVIDIA_SMI_FAIL=1
-    timeout 10 "$ws/research" 2>&1 || true
+    timeout 10 "$ws/research" --container 2>&1 || true
   )"
   assert_contains "host GPU failure mentions nvidia-smi" "nvidia-smi" "$out"
   assert_eq "no compose up when host GPU fails" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
@@ -457,7 +497,7 @@ test_gpu_preflight_fails_before_compose_up() {
   ws="$(mktemp -d)"
   setup_workspace "$ws"
   rm -f "$ws/bin/nvidia-ctk"
-  out="$(run_research "$ws" 2>&1 || true)"
+  out="$(run_research "$ws" --container 2>&1 || true)"
   assert_contains "names nvidia-ctk missing" "nvidia-ctk" "$out"
   assert_eq "no compose up when nvidia-ctk missing" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
   rm -rf "$ws"
@@ -476,7 +516,7 @@ test_gpu_preflight_fails_before_compose_up() {
   out="$(
     cd "$ws"
     export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_CUDA_PROBE_FAIL=1
-    timeout 10 "$ws/research" 2>&1 || true
+    timeout 10 "$ws/research" --container 2>&1 || true
   )"
   assert_contains "CUDA probe failure is actionable" "CUDA" "$out"
   assert_eq "no compose up when CUDA probe fails" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
@@ -495,7 +535,7 @@ test_backend_and_worker_share_image_worker_only_has_gpu() {
     mkdir -p "$ws/state/images"
     echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
   )
-  run_research "$ws" >/dev/null 2>&1 || true
+  run_research "$ws" --container >/dev/null 2>&1 || true
   # After up, inspect recorded env
   assert_contains "shared image env set" "Q_BACKEND_IMAGE=" "$(cat "$ws/state/compose_up.env" 2>/dev/null || true)"
   local cfg
@@ -533,6 +573,153 @@ test_cleanup_preserves_durable_state() {
   rm -rf "$ws"
 }
 
+test_host_mode_is_default_and_builds_nothing() {
+  local ws log
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" >/dev/null 2>&1 || true
+  log="$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  assert_eq "default mode builds no image" "0" "$(count_log "$ws/state/docker.log" '^docker build ')"
+  assert_eq "default mode runs no GPU probe container" "0" "$(count_log "$ws/state/docker.log" '^docker run ')"
+  assert_not_contains "default mode does not pull the backend image" "docker pull" "$log"
+  # Only infra comes up; the containerized profile stays out of the up command.
+  assert_eq "default mode brings up postgres and redis only" "1" \
+    "$(count_log "$ws/state/docker.log" 'compose .*up .*postgres redis')"
+  assert_eq "default mode never ups the containerized profile" "0" \
+    "$(count_log "$ws/state/docker.log" 'compose .*--profile containerized up')"
+  rm -rf "$ws"
+}
+
+test_host_mode_syncs_venv_migrates_and_starts_processes() {
+  local ws host
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" >/dev/null 2>&1 || true
+  assert_contains "host mode syncs the pinned venv" "uv sync --frozen" \
+    "$(cat "$ws/state/uv.log" 2>/dev/null || true)"
+  host="$(cat "$ws/state/host.log" 2>/dev/null || true)"
+  assert_contains "host mode runs migrations" "alembic upgrade head" "$host"
+  assert_contains "host mode starts the API" "uvicorn q_backend.api.main:app" "$host"
+  assert_contains "host mode starts the worker" "worker" "$host"
+  rm -rf "$ws"
+}
+
+test_host_mode_does_not_require_nvidia_ctk() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  rm -f "$ws/bin/nvidia-ctk"
+  out="$(run_research "$ws" 2>&1 || true)"
+  assert_not_contains "host mode does not demand nvidia-ctk" "nvidia-ctk not found" "$out"
+  assert_eq "host mode still starts infra without the container toolkit" "1" \
+    "$(count_log "$ws/state/docker.log" 'compose .*up .*postgres redis')"
+  rm -rf "$ws"
+}
+
+test_host_cuda_failure_stops_before_compose_up() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_CUDA_PROBE_FAIL=1
+    timeout 10 "$ws/research" 2>&1 || true
+  )"
+  assert_contains "host CUDA failure is actionable" "CUDA probe failed for the host venv" "$out"
+  assert_eq "no compose up when host CUDA fails" "0" "$(count_log "$ws/state/docker.log" 'compose .*\bup\b')"
+  rm -rf "$ws"
+}
+
+test_host_migration_failure_is_reported() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_ALEMBIC_FAIL=1
+    timeout 10 "$ws/research" 2>&1 || true
+  )"
+  assert_contains "migration failure names the command" "alembic upgrade head failed" "$out"
+  rm -rf "$ws"
+}
+
+test_container_build_caps_build_cache() {
+  local ws log
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" --container >/dev/null 2>&1 || true
+  log="$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  assert_contains "a build caps the BuildKit cache" "builder prune" "$log"
+  assert_contains "the cap is bounded, not a full wipe" "--max-used-space" "$log"
+  assert_not_contains "the cap never touches images or volumes" "system prune" "$log"
+  rm -rf "$ws"
+}
+
+test_warm_container_launch_does_not_prune() {
+  local ws
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    fp="$(image_fingerprint)"
+    mkdir -p "$ws/state/images"
+    echo "FINGERPRINT=$fp" >"$ws/state/images/q-backend:dev"
+  )
+  : >"$ws/state/docker.log"
+  run_research "$ws" --container >/dev/null 2>&1 || true
+  assert_not_contains "warm launch does not prune" "prune" "$(cat "$ws/state/docker.log")"
+  rm -rf "$ws"
+}
+
+test_host_teardown_kills_the_whole_process_group() {
+  local ws leader child alive
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # A master that forks a child, like the Dramatiq worker pool does.
+  cat >"$ws/q_backend/.venv/bin/pool" <<'EOF'
+#!/usr/bin/env bash
+sleep 120 &
+echo "$!" >"${Q_TEST_STATE}/child.pid"
+sleep 120
+EOF
+  chmod +x "$ws/q_backend/.venv/bin/pool"
+
+  leader="$(
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    LOG_DIR="$ws/state"
+    start_host_process pool "$ws/q_backend/.venv/bin/pool"
+  )"
+
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$ws/state/child.pid" ]] && break
+    sleep 0.2
+  done
+  child="$(cat "$ws/state/child.pid" 2>/dev/null || true)"
+
+  assert_eq "start reports a live leader" "0" "$(kill -0 "$leader" 2>/dev/null; echo $?)"
+  assert_eq "the forked child is running" "0" "$(kill -0 "$child" 2>/dev/null; echo $?)"
+
+  (
+    export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    # shellcheck disable=SC1091
+    source "$ws/research"
+    stop_host_process "$leader" pool
+  ) >/dev/null 2>&1
+
+  alive=0
+  kill -0 "$leader" 2>/dev/null && alive=$((alive + 1))
+  [[ -n "$child" ]] && kill -0 "$child" 2>/dev/null && alive=$((alive + 1))
+  assert_eq "teardown leaves no orphaned backend processes" "0" "$alive"
+
+  kill -9 "$leader" "$child" 2>/dev/null || true
+  rm -rf "$ws"
+}
+
 main() {
   [[ -x "$RESEARCH_SRC" ]] || die "missing executable $RESEARCH_SRC"
 
@@ -545,6 +732,14 @@ main() {
   test_gpu_preflight_fails_before_compose_up
   test_backend_and_worker_share_image_worker_only_has_gpu
   test_cleanup_preserves_durable_state
+  test_host_mode_is_default_and_builds_nothing
+  test_host_mode_syncs_venv_migrates_and_starts_processes
+  test_host_mode_does_not_require_nvidia_ctk
+  test_host_cuda_failure_stops_before_compose_up
+  test_host_migration_failure_is_reported
+  test_container_build_caps_build_cache
+  test_warm_container_launch_does_not_prune
+  test_host_teardown_kills_the_whole_process_group
 
   echo
   echo "passed=$PASS failed=$FAIL"
