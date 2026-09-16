@@ -40,6 +40,7 @@ MODE="${Q_RESEARCH_MODE:-host}"
 UI_PID=""
 API_PID=""
 WORKER_PID=""
+RELAY_PID=""
 CLEANED_UP=0
 FORCE_REBUILD=0
 STARTED_AT=""
@@ -421,6 +422,7 @@ cleanup() {
   fi
 
   stop_host_process "$WORKER_PID" "worker"
+  stop_host_process "$RELAY_PID" "relay"
   stop_host_process "$API_PID" "API"
 
   # Stop containerized profile services; keep named volumes, images, and caches.
@@ -505,7 +507,7 @@ main() {
     ensure_backend_image
     check_worker_cuda
 
-    echo "starting Postgres, Redis, API, and worker ..."
+    echo "starting Postgres, Redis, API, worker, and outbox relay ..."
     export Q_BACKEND_IMAGE="$BACKEND_IMAGE"
     export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
     export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
@@ -523,10 +525,15 @@ main() {
 
     run_host_migrations
 
-    echo "starting host API and Dramatiq worker ..."
+    echo "starting host API, Dramatiq worker, and outbox relay ..."
     API_PID="$(start_host_process api "$BACKEND_DIR/.venv/bin/uvicorn" \
       q_backend.api.main:app --host 127.0.0.1 --port 8000)"
     WORKER_PID="$(start_host_process worker "$BACKEND_DIR/.venv/bin/worker")"
+    # The transactional outbox relay publishes jobs.terminal events from Postgres
+    # to Redis Streams, which is how the UI learns a job finished. Without it a
+    # backtest completes but the UI waits forever: its polling is stream-aware and
+    # backs off expecting an event that never arrives.
+    RELAY_PID="$(start_host_process relay "$BACKEND_DIR/.venv/bin/q-outbox-relay")"
   fi
 
   wait_for_api 90

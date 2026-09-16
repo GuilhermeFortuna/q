@@ -110,6 +110,10 @@ services:
     environment:
       Q_TORCH_DEVICE: ${Q_TORCH_DEVICE:-cuda}
     gpus: all
+  relay:
+    profiles: ["containerized"]
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+    command: ["q-outbox-relay"]
 EOF
   mkdir -p "$ws/q_frontend"
   : >"$ws/q_frontend/.env.example"
@@ -182,6 +186,11 @@ EOF
   cat >"$ws/q_backend/.venv/bin/worker" <<'EOF'
 #!/usr/bin/env bash
 echo "worker $*" >>"${Q_TEST_STATE}/host.log"
+sleep 5
+EOF
+  cat >"$ws/q_backend/.venv/bin/q-outbox-relay" <<'EOF'
+#!/usr/bin/env bash
+echo "q-outbox-relay $*" >>"${Q_TEST_STATE}/host.log"
 sleep 5
 EOF
   chmod +x "$ws/q_backend/.venv/bin"/*
@@ -312,6 +321,9 @@ services:
     environment:
       Q_TORCH_DEVICE: ${Q_TORCH_DEVICE:-cuda}
     gpus: all
+  relay:
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+    command: ["q-outbox-relay"]
 CFG
     exit 0
   fi
@@ -720,6 +732,40 @@ EOF
   rm -rf "$ws"
 }
 
+test_host_mode_starts_the_outbox_relay() {
+  local ws host
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" >/dev/null 2>&1 || true
+  host="$(cat "$ws/state/host.log" 2>/dev/null || true)"
+  # Without the relay, jobs.terminal events never reach Redis and the UI, whose
+  # polling is stream-aware, waits forever on a completed backtest.
+  assert_contains "host mode starts the outbox relay" "q-outbox-relay" "$host"
+  rm -rf "$ws"
+}
+
+test_container_mode_runs_the_relay_on_the_shared_image() {
+  local ws cfg
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  cfg="$(
+    cd "$ws/q_backend"
+    export Q_BACKEND_IMAGE="q-backend:dev" Q_TORCH_DEVICE=cuda
+    PATH="$(test_path "$ws")" Q_TEST_STATE="$ws/state" docker compose --profile containerized config
+  )"
+  assert_contains "relay is part of the containerized profile" "q-outbox-relay" "$cfg"
+  rm -rf "$ws"
+}
+
+test_teardown_stops_the_relay() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_research "$ws" 2>&1 || true)"
+  assert_contains "teardown reports stopping the relay" "stopped relay" "$out"
+  rm -rf "$ws"
+}
+
 main() {
   [[ -x "$RESEARCH_SRC" ]] || die "missing executable $RESEARCH_SRC"
 
@@ -740,6 +786,9 @@ main() {
   test_container_build_caps_build_cache
   test_warm_container_launch_does_not_prune
   test_host_teardown_kills_the_whole_process_group
+  test_host_mode_starts_the_outbox_relay
+  test_container_mode_runs_the_relay_on_the_shared_image
+  test_teardown_stops_the_relay
 
   echo
   echo "passed=$PASS failed=$FAIL"
