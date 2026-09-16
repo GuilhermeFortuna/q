@@ -61,7 +61,7 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
 | `Todo` | Plan approved, ready to build | human only |
 | `In Progress` | An agent session is working on it | `./work start` |
 | `In Review` | Work committed on a local task branch, checks run, awaiting human review | agent |
-| `Done` | Merged into `development`, and in a repository with a `RELEASING.md` (`q_core`) released as a pushed `vYYYY.MM.DD` tag | `./work finish` (human) |
+| `Done` | Merged into `development`, and in a repository with a `RELEASING.md` (`q_core`) released as a pushed `vYYYY.MM.DD` tag (suffixed `.2`, `.3`, … for a second release the same day) | `./work finish` (human) |
 
 ### Rules for agents
 
