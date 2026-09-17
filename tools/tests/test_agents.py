@@ -18,8 +18,25 @@ def test_codex_effort_through_config():
     assert build_command("codex", "P", "high", "gpt-5").argv == ["codex", "-m", "gpt-5", "-c", "model_reasoning_effort=high", "P"]
 
 
+def test_codex_defaults_to_terra():
+    assert build_command("codex", "P", None, None).argv == [
+        "codex",
+        "-m",
+        "gpt-5.6-terra",
+        "-c",
+        "model_reasoning_effort=medium",
+        "P",
+    ]
+
+
 def test_cursor_effort_is_a_model_parameter():
     assert build_command("cursor", "P", "high", "sonnet-5").argv == ["agent", "--model", "sonnet-5[effort=high]", "P"]
+
+
+def test_cursor_model_without_effort_is_passed_unparameterized():
+    launch = build_command("cursor", "P", None, "composer-2.5")
+    assert launch.argv == ["agent", "--model", "composer-2.5", "P"]
+    assert "effort not applied" in launch.notice
 
 
 def test_cursor_without_model_skips_default_effort_with_notice():

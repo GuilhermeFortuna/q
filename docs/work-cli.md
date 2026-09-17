@@ -78,7 +78,7 @@ the agent in your terminal with a prompt that points it at the task's spec and p
 | `ID`         | yes      | —               | Board task ID, e.g. `Q-010`                                                                                                    |
 | `--agent`    | yes      | —               | `claude`, `codex`, `cursor` or `antigravity`                                                                                   |
 | `--effort`   | no       | `medium`        | Reasoning effort; allowed values depend on the agent ([table](#agents-effort-and-models))                                      |
-| `--model`    | no       | agent's default | Model name passed to the agent                                                                                                 |
+| `--model`    | no       | `gpt-5.6-terra` for `codex`, otherwise the agent's default | Model name passed to the agent                                                              |
 | `--worktree` | no       | off             | Work in `q/.worktrees/<repo>/<branch>` instead of switching the repo's own checkout ([details](#branch-mode-vs-worktree-mode)) |
 | `--dry-run`  | no       | off             | Run every check, then print what would happen and the full prompt. Changes nothing.                                            |
 
@@ -285,6 +285,8 @@ and bump steps are then no-ops, so the retry is safe.
 
 
 - An `--effort` value the agent doesn't accept is an error, e.g. `--agent antigravity --effort xhigh`.
+- **Codex** defaults to `gpt-5.6-terra` when `--model` is omitted; pass `--model` to override it.
+  The other agents fall back to whatever their own CLI is configured to use.
 - **Cursor** can only apply effort through a model. `--agent cursor --effort high` without
 `--model` is an error. With neither flag, Cursor uses its defaults and `work` prints a notice
 that the default effort wasn't applied.

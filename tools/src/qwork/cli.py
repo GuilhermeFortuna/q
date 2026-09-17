@@ -11,6 +11,11 @@ from qwork.context import Context
 from qwork.errors import QworkError
 
 
+def _default_models() -> str:
+    defaults = [f"{name} {spec.default_model}" for name, spec in AGENTS.items() if spec.default_model]
+    return ", ".join(defaults) if defaults else "agent's own"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="work", description="Launch and finish Q board tasks with AI coding agents.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -19,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("task_id", metavar="ID")
     start.add_argument("--agent", required=True, choices=list(AGENTS))
     start.add_argument("--effort", help=f"reasoning effort (default: {DEFAULT_EFFORT})")
-    start.add_argument("--model", help="model passed to the agent")
+    start.add_argument("--model", help=f"model passed to the agent (defaults: {_default_models()})")
     start.add_argument("--worktree", action="store_true", help="work in q/.worktrees instead of the repo checkout")
     start.add_argument("--dry-run", action="store_true", help="check and print the prompt without changing anything")
 

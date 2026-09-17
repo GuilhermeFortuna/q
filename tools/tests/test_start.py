@@ -34,7 +34,7 @@ def test_dry_run_changes_nothing(make_ctx):
     out = ctx.out.getvalue()
     assert "Dry run" in out
     assert f"create branch {BRANCH} from development" in out
-    assert "launch: codex -c model_reasoning_effort=high <prompt>" in out
+    assert "launch: codex -m gpt-5.6-terra -c model_reasoning_effort=high <prompt>" in out
     assert f"{ctx.workspace}/work board set Q-010 in-review" in out
     assert f"relative to the workspace root `{ctx.workspace}`" in out
 
