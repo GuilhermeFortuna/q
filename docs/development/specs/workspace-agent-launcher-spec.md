@@ -209,18 +209,27 @@ and the rendered prompt, and changes nothing (no branch, worktree, status or lau
 **Preconditions**
 
 1. Task resolves; status is `In Review`.
-2. Branch `<branch>` exists.
-3. If a worktree for the branch exists, it has no uncommitted changes to tracked files.
-4. The repo's main checkout has no uncommitted changes to tracked files.
+2. Branch `<branch>` exists in the task's repository.
+3. The task's repositories are the task's own plus every other workspace repository
+   that has a branch named `<branch>` (e.g. a backend task that recaptures a contract
+   in `q_contracts`). For each of them:
+   - a worktree for the branch, if present, has no uncommitted or untracked files;
+   - the main checkout has no uncommitted changes to tracked files;
+   - `git merge-tree` reports that merging `<branch>` into `development` has no conflicts.
+
+   Any failure is reported before any repository is merged.
 
 **Effects, in order**
 
-1. In `q/<repo>`: `git checkout development`, then `git merge --no-ff <branch>`.
-   On failure: `git merge --abort`, report, exit non-zero. No further effects.
-2. Remove the worktree if present (`git worktree remove`). The branch is kept.
-3. With `--push`: `git push origin development`.
+1. For each task repository (`q_contracts`, then `q_core`, then the rest by name):
+   `git checkout development`, `git merge --no-ff <branch>`, and remove the worktree
+   if present (`git worktree remove`). Branches are kept.
+2. In each task repository with a `RELEASING.md` whose `development` is not already
+   tagged: cut a release (see `RELEASING.md`).
+3. With `--push`, or when a release was cut (unless `--no-push`): push `development`
+   (and any release tag) in every task repository.
 4. Set status to `Done`.
-5. Close the issue with a comment naming the merge commit SHA and branch.
+5. Close the issue with a comment naming the branch and each repository's merge commit SHA.
 
 ### 2.8 Prompt template
 

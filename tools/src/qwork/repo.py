@@ -42,8 +42,13 @@ def task_files(workspace: Path, task: Task) -> TaskFiles:
     )
 
 
-def worktree_path(workspace: Path, task: Task) -> Path:
-    return workspace / ".worktrees" / task.repo / task.branch
+def worktree_path(workspace: Path, task: Task, repo: str | None = None) -> Path:
+    return workspace / ".worktrees" / (repo or task.repo) / task.branch
+
+
+def workspace_repos(workspace: Path) -> list[Path]:
+    """The product repositories cloned directly under the workspace root."""
+    return sorted(p for p in workspace.iterdir() if not p.is_symlink() and p.is_dir() and (p / ".git").exists())
 
 
 class Git:
@@ -86,6 +91,26 @@ class Git:
 
     def remove_worktree(self, path: Path) -> None:
         self._git("worktree", "remove", str(path))
+
+    def is_ancestor(self, commit: str, of: str) -> bool:
+        try:
+            self._git("merge-base", "--is-ancestor", commit, of)
+        except CommandError:
+            return False
+        return True
+
+    def merge_conflicts(self, into: str, branch: str) -> list[str]:
+        """Files that merging `branch` into `into` would conflict on, without touching the worktree."""
+        try:
+            self._git("merge-tree", "--write-tree", "--name-only", "--no-messages", into, branch)
+        except CommandError as exc:
+            if exc.returncode != 1:
+                raise
+            return exc.stdout.splitlines()[1:]
+        return []
+
+    def tags_at(self, commit: str) -> list[str]:
+        return self._git("tag", "--points-at", commit).split()
 
     def merge_no_ff(self, branch: str, message: str) -> str:
         try:
