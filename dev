@@ -1,0 +1,891 @@
+#!/usr/bin/env bash
+# Workspace development launcher for the Q platform.
+#
+# Docker Compose provides Postgres/Redis; systemd user units supervise Q backend
+# and MT5 services. q_terminal runs in the foreground and is not supervised.
+#
+# Usage (from workspace root or any directory):
+#   ./dev up terminal       # backend + live market data + q_terminal (foreground)
+#   ./dev up execution      # backend + live market data + MT5 edge + execution worker
+#   ./dev up full           # everything above + q_terminal (foreground)
+#   ./dev down              # stop Q-owned Docker containers and systemd units
+#   ./dev status            # concise stack overview
+#   ./dev logs [service]    # follow logs with aliases
+#   ./dev restart <service> # restart a service by alias
+#   ./dev --help
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+BACKEND_DIR="$ROOT/q_backend"
+TERMINAL_DIR="$ROOT/q_terminal"
+COMPOSE_PROJECT="${Q_DEV_COMPOSE_PROJECT:-q-dev}"
+COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT")
+
+PG_PORT="${Q_DEV_PG_PORT:-5434}"
+REDIS_PORT="${Q_DEV_REDIS_PORT:-6380}"
+API_PORT="${Q_DEV_API_PORT:-8000}"
+API_HEALTH_URL="${Q_DEV_HEALTH_URL:-http://127.0.0.1:${API_PORT}/api/v1/system/health}"
+EXEC_HEALTH_URL="${Q_DEV_EXEC_HEALTH_URL:-http://127.0.0.1:${API_PORT}/api/v1/execution/health}"
+GATEWAY_URL="${Q_DEV_GATEWAY_URL:-http://127.0.0.1:18812}"
+GATEWAY_HEALTH_URL="${Q_DEV_GATEWAY_HEALTH_URL:-${GATEWAY_URL}/v1/health}"
+GATEWAY_ENV_FILE="${HOME}/.config/mt5-gateway/mt5-gateway.env"
+EDGE_HEALTH_URL="${Q_DEV_EDGE_HEALTH_URL:-http://127.0.0.1:18813/v1/health}"
+
+WAIT_ATTEMPTS="${Q_DEV_WAIT_ATTEMPTS:-45}"
+WAIT_INTERVAL="${Q_DEV_WAIT_INTERVAL:-2}"
+STATE_DIR="${Q_DEV_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/q-dev}"
+
+# Set by ensure_backend_env_file when backend.env content changes; running
+# backend units are then restarted instead of skipped.
+BACKEND_ENV_CHANGED=0
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "'$1' is required but was not found on PATH"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./dev <command> [args]
+
+Commands:
+  up terminal     Start backend (Postgres, Redis, API, outbox relay), live market data
+                  (MT5 terminal, gateway, market-data publisher) and launch q_terminal
+  up execution    Start backend + live market data + MT5 edge + execution worker
+  up full         Start the execution profile and launch q_terminal
+  down            Stop Q-owned Docker containers and systemd user units
+  status          Show concise Q stack overview
+  logs [service]  Follow logs (aliases: api, outbox, publisher, postgres, redis, execution, mt5, …)
+  restart <svc>   Restart a service by alias
+
+Service aliases:
+  postgres, redis, migrate, api, outbox, publisher (market), execution, live,
+  mt5 (terminal-mt5), gateway, edge
+  research/worker are managed by ./research, not ./dev
+
+Environment:
+  Q_DEV_COMPOSE_PROJECT  Docker Compose project name (default: q-dev)
+  Q_DEV_PG_PORT          Postgres port (default: 5434)
+  Q_DEV_REDIS_PORT       Redis port (default: 6380)
+  Q_DEV_API_PORT         API port (default: 8000)
+  Q_DEV_GATEWAY_URL      MT5 gateway base URL (default: http://127.0.0.1:18812)
+  Q_TERMINAL_SYMBOL      q_terminal symbol (default: PETR4; must be in Q_STREAM_SYMBOLS)
+  Q_TERMINAL_TIMEFRAME   q_terminal timeframe (default: M1; must be in Q_STREAM_BAR_TIMEFRAMES)
+  Q_DEV_WAIT_ATTEMPTS    Readiness poll attempts (default: 45)
+  Q_DEV_WAIT_INTERVAL    Seconds between polls (default: 2)
+
+See also:
+  ./research   Research/backtests stack (tears down on Ctrl+C)
+  q_backend/docker-compose.yml
+EOF
+}
+
+# --- service metadata ---
+
+service_kind() {
+  case "${1,,}" in
+    postgres|redis) echo "docker" ;;
+    migrate) echo "migrate" ;;
+    api|outbox|publisher|market|execution) echo "systemd-backend" ;;
+    mt5|terminal-mt5|gateway|edge) echo "systemd-mt5" ;;
+    live) echo "capability" ;;
+    research|worker) echo "unused" ;;
+    *) die "unknown service alias: $1 (try: api, outbox, publisher, postgres, redis, execution, live, mt5, gateway, edge)" ;;
+  esac
+}
+
+compose_service() {
+  case "${1,,}" in
+    postgres) echo "postgres" ;;
+    redis) echo "redis" ;;
+    *) die "no compose service for alias: $1" ;;
+  esac
+}
+
+backend_unit() {
+  case "${1,,}" in
+    api) echo "q-api.service" ;;
+    outbox) echo "q-outbox-relay.service" ;;
+    publisher|market) echo "q-market-publisher.service" ;;
+    execution) echo "q-execution-worker.service" ;;
+    *) die "no backend unit for alias: $1" ;;
+  esac
+}
+
+mt5_unit() {
+  case "${1,,}" in
+    mt5|terminal-mt5) echo "mt5-terminal.service" ;;
+    gateway) echo "mt5-gateway.service" ;;
+    edge) echo "mt5-edge.service" ;;
+    *) die "no MT5 unit for alias: $1" ;;
+  esac
+}
+
+systemd_unit() {
+  local kind
+  kind="$(service_kind "$1")"
+  case "$kind" in
+    systemd-backend) backend_unit "$1" ;;
+    systemd-mt5) mt5_unit "$1" ;;
+    *) die "no systemd unit for alias: $1" ;;
+  esac
+}
+
+# --- Docker helpers ---
+
+ensure_docker() {
+  need docker
+  docker compose version >/dev/null 2>&1 || die "Docker Compose is required (verify: docker compose version)"
+  docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (verify: docker info)"
+}
+
+docker_service_running() {
+  local service="$1"
+  "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx "$service"
+}
+
+check_port() {
+  local port="$1"
+  (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+}
+
+guard_port_conflicts() {
+  local service port
+  for service in postgres redis; do
+    port="$PG_PORT"
+    [[ "$service" == "redis" ]] && port="$REDIS_PORT"
+    if check_port "$port" && ! docker_service_running "$service"; then
+      echo "error: port $port is in use by a non-Q-dev container or process." >&2
+      echo "hint: stop the conflicting service, or run: docker compose -p $COMPOSE_PROJECT -f $BACKEND_DIR/docker-compose.yml stop $service" >&2
+      exit 1
+    fi
+  done
+}
+
+start_docker_infra() {
+  mkdir -p \
+    "$BACKEND_DIR/data/lake" \
+    "$BACKEND_DIR/data/market" \
+    "$BACKEND_DIR/data/tick_cache"
+  echo "==> Starting Postgres and Redis (Docker Compose project: $COMPOSE_PROJECT)..."
+  "${COMPOSE[@]}" up -d --wait postgres redis
+}
+
+stop_docker_infra() {
+  echo "==> Stopping Q-dev Docker containers..."
+  "${COMPOSE[@]}" stop postgres redis 2>/dev/null || true
+}
+
+# --- systemd helpers ---
+
+ensure_systemd_user() {
+  need systemctl
+  if ! systemctl --user status >/dev/null 2>&1; then
+    die "systemd user session is not available (is \$XDG_RUNTIME_DIR set?)"
+  fi
+}
+
+unit_installed() {
+  systemctl --user cat "$1" >/dev/null 2>&1
+}
+
+unit_active() {
+  systemctl --user is-active --quiet "$1" 2>/dev/null
+}
+
+unit_state() {
+  systemctl --user show -p ActiveState,SubState --value "$1" 2>/dev/null | tr '\n' '/' | sed 's|/$||'
+}
+
+render_and_install_unit() {
+  local template="$1"
+  local dst="$2"
+  local tmp
+  tmp="$(mktemp)"
+  sed "s|@Q_BACKEND_DIR@|$BACKEND_DIR|g" "$template" >"$tmp"
+  if [[ -f "$dst" ]] && cmp -s "$tmp" "$dst"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dst"
+  return 0
+}
+
+ensure_backend_env_file() {
+  local config_dir="${HOME}/.config/q"
+  local env_file="$config_dir/backend.env"
+  mkdir -p "$config_dir"
+  local before=""
+  [[ -f "$env_file" ]] && before="$(cksum <"$env_file")"
+
+  if [[ ! -f "$env_file" ]]; then
+    cp "$BACKEND_DIR/deploy/systemd/backend.env.example" "$env_file"
+  fi
+
+  # Ensure Docker-hosted endpoints and absolute data roots for systemd units.
+  local -a keys=(
+    "Q_DATABASE_URL=postgresql+psycopg://q:q@127.0.0.1:${PG_PORT}/q"
+    "Q_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0"
+    "Q_DATA_LAKE_ROOT=$BACKEND_DIR/data/lake"
+    "Q_MARKET_DATA_ROOT=$BACKEND_DIR/data/market"
+    "Q_TICK_CACHE_DIR=$BACKEND_DIR/data/tick_cache"
+    "Q_RUNTIME_CONFIG_PATH=$BACKEND_DIR/data/runtime_config.json"
+    "Q_MT5_GATEWAY_URL=$GATEWAY_URL"
+  )
+  # Mirror the gateway's shared token so the API and publisher can authenticate.
+  local gateway_token=""
+  if [[ -f "$GATEWAY_ENV_FILE" ]]; then
+    gateway_token="$(sed -n 's/^MT5_GATEWAY_TOKEN=//p' "$GATEWAY_ENV_FILE" | tail -n1)"
+  fi
+  if [[ -n "$gateway_token" ]]; then
+    keys+=("Q_MT5_GATEWAY_TOKEN=$gateway_token")
+  fi
+  local line key val
+  for line in "${keys[@]}"; do
+    key="${line%%=*}"
+    val="${line#*=}"
+    if grep -q "^${key}=" "$env_file"; then
+      # awk + ENVIRON so values containing sed metacharacters (tokens) survive.
+      KEY="$key" VAL="$val" awk 'BEGIN { k = ENVIRON["KEY"] "=" }
+        index($0, k) == 1 { print k ENVIRON["VAL"]; next } { print }' \
+        "$env_file" >"$env_file.tmp" && mv "$env_file.tmp" "$env_file"
+    else
+      printf '%s=%s\n' "$key" "$val" >>"$env_file"
+    fi
+  done
+
+  if [[ "$(cksum <"$env_file")" != "$before" ]]; then
+    BACKEND_ENV_CHANGED=1
+  fi
+}
+
+install_dev_units() {
+  local dest="${HOME}/.config/systemd/user"
+  local template_dir="$BACKEND_DIR/deploy/systemd/dev"
+  local changed=0
+
+  ensure_systemd_user
+  ensure_backend_env_file
+
+  echo "==> Installing dev systemd user units..."
+  (cd "$BACKEND_DIR" && uv sync --frozen --no-dev)
+
+  mkdir -p "$dest"
+  for template in "$template_dir"/*.service.in; do
+    local unit_name
+    unit_name="$(basename "$template" .in)"
+    if render_and_install_unit "$template" "$dest/$unit_name"; then
+      changed=1
+    fi
+  done
+
+  if [[ "$changed" -eq 1 ]]; then
+    systemctl --user daemon-reload
+  fi
+}
+
+seed_env_file() {
+  local example="$1"
+  local dest="$2"
+
+  if [[ -f "$dest" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+  sed \
+    -e "s|/home/CHANGE_ME/q/q_backend|${BACKEND_DIR}|g" \
+    -e "s|/home/CHANGE_ME|${HOME}|g" \
+    "$example" > "$dest"
+  echo "created $dest from $(basename "$example")"
+}
+
+ensure_mt5_units() {
+  local unit_dir="${HOME}/.config/systemd/user"
+  local gateway_env="$GATEWAY_ENV_FILE"
+  local edge_env="${HOME}/.config/mt5-edge/mt5-edge.env"
+  local systemd_src="$BACKEND_DIR/gateway/systemd"
+  local changed=0
+
+  mkdir -p "$unit_dir"
+
+  for unit in mt5-terminal.service mt5-gateway.service mt5-edge.service; do
+    local src="$systemd_src/$unit"
+    local dst="$unit_dir/$unit"
+    [[ -f "$src" ]] || die "missing $src"
+    if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
+      cp "$src" "$dst"
+      changed=1
+    fi
+  done
+
+  seed_env_file "$systemd_src/mt5-gateway.env.example" "$gateway_env"
+  seed_env_file "$systemd_src/mt5-edge.env.example" "$edge_env"
+
+  if [[ "$changed" -eq 1 ]]; then
+    systemctl --user daemon-reload
+  fi
+}
+
+# --- health helpers ---
+
+exec_health_json() {
+  curl -fsS "$EXEC_HEALTH_URL" 2>/dev/null || echo '{}'
+}
+
+exec_health_field() {
+  local py="$1"
+  need python3
+  exec_health_json | python3 -c "import json,sys
+data=json.load(sys.stdin)
+${py}" 2>/dev/null || true
+}
+
+edge_http_reachable() {
+  curl -fsS "$EDGE_HEALTH_URL" >/dev/null 2>&1
+}
+
+edge_mt5_connected() {
+  local connected
+  connected="$(curl -fsS "$EDGE_HEALTH_URL" 2>/dev/null | sed -n 's/.*"mt5_connected"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | head -n1)"
+  [[ "$connected" == "true" ]]
+}
+
+execution_worker_process_ready() {
+  unit_active "$(backend_unit execution)"
+}
+
+execution_worker_heartbeat_ready() {
+  local status
+  status="$(exec_health_field "print(data.get('worker_status', 'offline'), end='')")"
+  [[ "$status" == "healthy" || "$status" == "stale" ]]
+}
+
+execution_live_available() {
+  local worker_status edge_reachable edge_connected
+  worker_status="$(exec_health_field "print(data.get('worker_status', 'offline'), end='')")"
+  edge_reachable="$(exec_health_field "print(data.get('edge', {}).get('reachable', False), end='')")"
+  edge_connected="$(exec_health_field "print(data.get('edge', {}).get('mt5_connected', False), end='')")"
+  [[ "$worker_status" == "healthy" ]] && [[ "$edge_reachable" == "True" ]] && [[ "$edge_connected" == "True" ]]
+}
+
+# --- readiness checks ---
+
+ready_postgres() {
+  if command -v pg_isready >/dev/null 2>&1; then
+    pg_isready -h 127.0.0.1 -p "$PG_PORT" -U q -d q >/dev/null 2>&1
+  elif docker_service_running postgres; then
+    "${COMPOSE[@]}" exec -T postgres pg_isready -U q -d q >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+ready_redis() {
+  if command -v redis-cli >/dev/null 2>&1; then
+    [[ "$(redis-cli -p "$REDIS_PORT" ping 2>/dev/null)" == "PONG" ]]
+  elif docker_service_running redis; then
+    [[ "$("${COMPOSE[@]}" exec -T redis redis-cli ping 2>/dev/null)" == "PONG" ]]
+  else
+    return 1
+  fi
+}
+
+ready_api() {
+  curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1
+}
+
+ready_outbox() {
+  unit_active "$(backend_unit outbox)"
+}
+
+ready_publisher() {
+  unit_active "$(backend_unit publisher)"
+}
+
+ready_gateway() {
+  curl -fsS "$GATEWAY_HEALTH_URL" >/dev/null 2>&1
+}
+
+ready_edge() {
+  edge_http_reachable
+}
+
+ready_mt5_terminal() {
+  unit_active "$(mt5_unit mt5)"
+}
+
+migrate_done() {
+  [[ -f "$STATE_DIR/migrate.stamp" ]]
+}
+
+readiness_summary() {
+  local alias="$1"
+  case "$alias" in
+    postgres)
+      if ready_postgres; then echo "ready"; else echo "not ready"; fi
+      ;;
+    redis)
+      if ready_redis; then echo "PONG"; else echo "not ready"; fi
+      ;;
+    migrate)
+      if migrate_done; then echo "done"; else echo "pending"; fi
+      ;;
+    api)
+      if ready_api; then echo "healthy"; else echo "not ready"; fi
+      ;;
+    outbox)
+      if ready_outbox; then echo "active"; else echo "not ready"; fi
+      ;;
+    gateway)
+      if ready_gateway; then
+        local connected
+        connected="$(curl -fsS "$GATEWAY_HEALTH_URL" 2>/dev/null | sed -n 's/.*"mt5_connected"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | head -n1)"
+        echo "http ok (mt5_connected=${connected:-unknown})"
+      else
+        echo "unavailable"
+      fi
+      ;;
+    edge)
+      if ready_edge; then
+        if edge_mt5_connected; then
+          echo "reachable (mt5_connected)"
+        else
+          echo "reachable (mt5 not connected)"
+        fi
+      else
+        echo "unavailable"
+      fi
+      ;;
+    execution)
+      if ! execution_worker_process_ready; then
+        echo "offline"
+      elif execution_live_available; then
+        echo "$(exec_health_field "print(data.get('worker_status', 'offline'), end='')")"
+      elif execution_worker_heartbeat_ready; then
+        echo "$(exec_health_field "print(data.get('worker_status', 'offline'), end='')") (degraded)"
+      else
+        echo "starting"
+      fi
+      ;;
+    live)
+      if execution_live_available; then
+        echo "available"
+      else
+        echo "unavailable"
+      fi
+      ;;
+    publisher)
+      if ! ready_publisher; then
+        echo "not ready"
+      elif ready_gateway; then
+        echo "active (gateway reachable)"
+      else
+        echo "active (waiting for gateway)"
+      fi
+      ;;
+    research)
+      echo "managed by ./research"
+      ;;
+    mt5)
+      if unit_active "$(mt5_unit mt5)"; then echo "active"; else echo "inactive"; fi
+      ;;
+    *)
+      echo "-"
+      ;;
+  esac
+}
+
+wait_for() {
+  local label="$1"
+  local hint="$2"
+  local check_fn="$3"
+  local i elapsed
+
+  if "$check_fn"; then
+    echo "$label: already ready"
+    return 0
+  fi
+
+  echo "waiting for $label..."
+  for ((i = 1; i <= WAIT_ATTEMPTS; i++)); do
+    if "$check_fn"; then
+      elapsed=$((i * WAIT_INTERVAL))
+      echo "$label: ready (${elapsed}s)"
+      return 0
+    fi
+    sleep "$WAIT_INTERVAL"
+  done
+
+  echo "error: $label did not become ready within $((WAIT_ATTEMPTS * WAIT_INTERVAL))s" >&2
+  [[ -n "$hint" ]] && echo "hint: $hint" >&2
+  return 1
+}
+
+run_migrations() {
+  echo "==> Running database migrations..."
+  ensure_backend_env_file
+  # shellcheck disable=SC1091
+  set -a && source "${HOME}/.config/q/backend.env" && set +a
+  (cd "$BACKEND_DIR" && "$BACKEND_DIR/.venv/bin/alembic" upgrade head)
+  mkdir -p "$STATE_DIR"
+  date -Iseconds >"$STATE_DIR/migrate.stamp"
+}
+
+start_systemd_backend() {
+  install_dev_units
+  need curl
+
+  if [[ "$BACKEND_ENV_CHANGED" -eq 1 ]]; then
+    echo "==> backend.env changed; (re)starting API and outbox relay (systemd)..."
+    systemctl --user restart "$(backend_unit api)" "$(backend_unit outbox)"
+  elif unit_active "$(backend_unit api)" && unit_active "$(backend_unit outbox)" && ready_api; then
+    echo "systemd backend: already running"
+    return 0
+  else
+    echo "==> Starting API and outbox relay (systemd)..."
+    systemctl --user start "$(backend_unit api)" "$(backend_unit outbox)"
+  fi
+  wait_for "api" "journalctl --user -u $(backend_unit api) -n 30 --no-pager" ready_api
+  wait_for "outbox relay" "journalctl --user -u $(backend_unit outbox) -n 30 --no-pager" ready_outbox
+}
+
+start_terminal_backend() {
+  echo "==> Starting terminal backend stack..."
+  ensure_systemd_user
+  guard_port_conflicts
+
+  if ready_postgres && ready_redis; then
+    echo "docker infra: already running"
+  else
+    start_docker_infra
+  fi
+
+  wait_for "postgres" "${COMPOSE[*]} logs postgres" ready_postgres
+  wait_for "redis" "${COMPOSE[*]} logs redis" ready_redis
+  run_migrations
+  start_systemd_backend
+}
+
+have_wine() {
+  command -v wine >/dev/null 2>&1
+}
+
+# Start (or restart, when backend.env changed) a backend unit and wait for it.
+start_backend_unit() {
+  local alias="$1" label="$2" check_fn="$3"
+  local unit
+  unit="$(backend_unit "$alias")"
+  if [[ "$BACKEND_ENV_CHANGED" -eq 1 ]]; then
+    systemctl --user restart "$unit" || true
+  elif "$check_fn"; then
+    echo "$label: already running"
+    return 0
+  else
+    systemctl --user start "$unit" || true
+  fi
+  wait_for "$label" "journalctl --user -u $unit -n 30 --no-pager" "$check_fn" || {
+    echo "warning: $label unit did not become active" >&2
+  }
+}
+
+# Live market data for q_terminal: MT5 terminal -> gateway -> publisher -> Redis streams.
+start_market_stack() {
+  echo "==> Starting live market data (MT5 terminal, gateway, publisher)..."
+
+  if have_wine; then
+    systemctl --user start "$(mt5_unit mt5)" || true
+    wait_for "mt5 terminal" "journalctl --user -u $(mt5_unit mt5) -n 30 --no-pager" ready_mt5_terminal || {
+      echo "warning: mt5 terminal did not become ready (broker login or Wine prefix may be needed)" >&2
+    }
+
+    systemctl --user start "$(mt5_unit gateway)" || true
+    wait_for "mt5 gateway" "journalctl --user -u $(mt5_unit gateway) -n 30 --no-pager" ready_gateway || {
+      echo "warning: mt5 gateway health check timed out (broker login may still be pending)" >&2
+    }
+  else
+    echo "warning: wine is not installed — skipping MT5 terminal/gateway (no live market data)" >&2
+    echo "hint: install wine and run q_backend/gateway/setup_wine.sh, then retry" >&2
+  fi
+
+  # The publisher pauses and retries while the gateway is unavailable, so it is
+  # always started; it resumes publishing once the gateway comes up.
+  start_backend_unit publisher "market-data publisher" ready_publisher
+}
+
+start_execution_stack() {
+  echo "==> Starting MT5 edge / execution worker..."
+
+  if have_wine; then
+    systemctl --user start "$(mt5_unit edge)" || true
+    wait_for "mt5 edge" "journalctl --user -u $(mt5_unit edge) -n 30 --no-pager" ready_edge || {
+      echo "warning: mt5 edge health check timed out (broker login may still be pending)" >&2
+    }
+  else
+    echo "warning: wine is not installed — skipping MT5 edge" >&2
+  fi
+
+  start_backend_unit execution "execution worker (process)" execution_worker_process_ready
+}
+
+execution_up_message() {
+  if execution_live_available; then
+    echo "==> Execution stack is up."
+  else
+    echo "==> Execution stack is up (degraded — live execution unavailable)."
+    printf "    execution: %s | edge: %s | live: %s\n" \
+      "$(readiness_summary execution)" \
+      "$(readiness_summary edge)" \
+      "$(readiness_summary live)"
+  fi
+}
+
+start_profile() {
+  local profile="$1"
+  ensure_docker
+  ensure_systemd_user
+  # Seed MT5 units and env files first so backend.env can mirror the gateway token.
+  if have_wine; then
+    ensure_mt5_units
+  fi
+  start_terminal_backend
+  start_market_stack
+
+  if [[ "$profile" == "execution" || "$profile" == "full" ]]; then
+    start_execution_stack
+  fi
+}
+
+launch_terminal() {
+  : "${Q_TERMINAL_API_BASE:=http://127.0.0.1:${API_PORT}}"
+  : "${Q_TERMINAL_SYMBOL:=PETR4}"
+  # Stream bars carry MT5-style timeframes (M1, M5, ...); q_terminal matches them exactly.
+  : "${Q_TERMINAL_TIMEFRAME:=M1}"
+  export Q_TERMINAL_API_BASE Q_TERMINAL_SYMBOL Q_TERMINAL_TIMEFRAME
+
+  echo "==> Launching q_terminal (Ctrl+C stops only the terminal; backends keep running)..."
+  exec make -C "$TERMINAL_DIR" run
+}
+
+cmd_up() {
+  local profile="${1:-}"
+  case "$profile" in
+    terminal)
+      start_profile terminal
+      launch_terminal
+      ;;
+    execution)
+      start_profile execution
+      execution_up_message
+      ;;
+    full)
+      start_profile full
+      execution_up_message
+      launch_terminal
+      ;;
+    *)
+      die "usage: ./dev up terminal|execution|full"
+      ;;
+  esac
+}
+
+stop_systemd_backend() {
+  if ! systemd_available; then
+    return 0
+  fi
+  systemctl --user stop \
+    "$(backend_unit execution)" \
+    "$(backend_unit publisher)" \
+    "$(mt5_unit edge)" \
+    "$(mt5_unit gateway)" \
+    "$(mt5_unit mt5)" \
+    "$(backend_unit outbox)" \
+    "$(backend_unit api)" \
+    2>/dev/null || true
+}
+
+systemd_available() {
+  command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1
+}
+
+cmd_down() {
+  stop_systemd_backend
+  if command -v docker >/dev/null 2>&1; then
+    stop_docker_infra
+  fi
+  echo "==> Q dev stack stopped."
+}
+
+service_state() {
+  local alias="$1"
+  local kind unit
+
+  kind="$(service_kind "$alias")"
+  case "$kind" in
+    docker)
+      local svc
+      svc="$(compose_service "$alias")"
+      if docker_service_running "$svc"; then
+        echo "running"
+      elif check_port "$([[ "$svc" == postgres ]] && echo "$PG_PORT" || echo "$REDIS_PORT")"; then
+        echo "port in use"
+      else
+        echo "stopped"
+      fi
+      ;;
+    migrate)
+      if migrate_done; then echo "done"; else echo "pending"; fi
+      ;;
+    systemd-backend|systemd-mt5)
+      unit="$(systemd_unit "$alias")"
+      if unit_installed "$unit"; then
+        local state
+        state="$(unit_state "$unit")"
+        if [[ "$alias" == "execution" ]] && unit_active "$unit" && ! execution_live_available; then
+          echo "running/degraded"
+        else
+          echo "$state"
+        fi
+      else
+        echo "not installed"
+      fi
+      ;;
+    capability)
+      if execution_live_available; then
+        echo "available"
+      else
+        echo "unavailable"
+      fi
+      ;;
+    unused)
+      echo "not started"
+      ;;
+  esac
+}
+
+service_label() {
+  local alias="$1"
+  case "$(service_kind "$alias")" in
+    docker) echo "docker:$(compose_service "$alias")" ;;
+    migrate) echo "alembic upgrade head" ;;
+    systemd-backend) echo "$(backend_unit "$alias")" ;;
+    systemd-mt5) echo "$(mt5_unit "$alias")" ;;
+    capability) echo "execution capability" ;;
+    unused) echo "-" ;;
+  esac
+}
+
+cmd_status() {
+  printf "%-12s %-28s %-18s %s\n" "ALIAS" "SERVICE" "STATE" "READINESS"
+  local aliases=(
+    postgres redis migrate api outbox
+    mt5 gateway publisher
+    execution live edge
+    research
+  )
+  local alias
+  for alias in "${aliases[@]}"; do
+    printf "%-12s %-28s %-18s %s\n" \
+      "$alias" \
+      "$(service_label "$alias")" \
+      "$(service_state "$alias")" \
+      "$(readiness_summary "$alias")"
+  done
+}
+
+cmd_logs() {
+  local alias="${1:-api}"
+  local kind
+  kind="$(service_kind "$alias")"
+
+  case "$kind" in
+    docker)
+      exec "${COMPOSE[@]}" logs -f "$(compose_service "$alias")"
+      ;;
+    systemd-backend|systemd-mt5)
+      need journalctl
+      ensure_systemd_user
+      local unit
+      unit="$(systemd_unit "$alias")"
+      unit_installed "$unit" || die "$unit is not installed (run ./dev up terminal first)"
+      exec journalctl --user -u "$unit" -f
+      ;;
+    *)
+      die "logs not available for alias: $alias"
+      ;;
+  esac
+}
+
+cmd_restart() {
+  local alias="${1:-}"
+  [[ -n "$alias" ]] || die "usage: ./dev restart <service>"
+
+  local kind
+  kind="$(service_kind "$alias")"
+
+  case "$kind" in
+    docker)
+      ensure_docker
+      "${COMPOSE[@]}" restart "$(compose_service "$alias")"
+      if [[ "$alias" == postgres ]]; then
+        wait_for "postgres" "${COMPOSE[*]} logs postgres" ready_postgres
+      else
+        wait_for "redis" "${COMPOSE[*]} logs redis" ready_redis
+      fi
+      ;;
+    systemd-backend|systemd-mt5)
+      ensure_systemd_user
+      local unit
+      unit="$(systemd_unit "$alias")"
+      unit_installed "$unit" || die "$unit is not installed (run ./dev up terminal first)"
+      systemctl --user restart "$unit"
+      case "$alias" in
+        api) wait_for "api" "journalctl --user -u $unit -n 30 --no-pager" ready_api ;;
+        outbox) wait_for "outbox relay" "journalctl --user -u $unit -n 30 --no-pager" ready_outbox ;;
+        publisher|market) wait_for "market-data publisher" "journalctl --user -u $unit -n 30 --no-pager" ready_publisher ;;
+        execution) wait_for "execution worker (process)" "journalctl --user -u $unit -n 30 --no-pager" execution_worker_process_ready ;;
+      esac
+      echo "restarted $unit"
+      ;;
+    *)
+      die "cannot restart alias: $alias"
+      ;;
+  esac
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      ;;
+    up)
+      shift
+      cmd_up "${1:-}"
+      ;;
+    down)
+      cmd_down
+      ;;
+    status)
+      cmd_status
+      ;;
+    logs)
+      shift
+      cmd_logs "${1:-api}"
+      ;;
+    restart)
+      shift
+      cmd_restart "${1:-}"
+      ;;
+    *)
+      die "unknown command: $cmd (try ./dev --help)"
+      ;;
+  esac
+}
+
+main "$@"

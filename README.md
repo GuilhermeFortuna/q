@@ -187,6 +187,35 @@ git clone https://github.com/GuilhermeFortuna/q_backend.git
 git clone https://github.com/GuilhermeFortuna/q_frontend.git
 ```
 
+### Terminal / Execution development (one command)
+
+From the workspace root, with Docker running, bring up the backend stack and
+launch `q_terminal`:
+
+```bash
+./dev up terminal      # Postgres, Redis, API, outbox relay, MT5 terminal/gateway,
+                       # market-data publisher + q_terminal
+./dev up execution     # above minus q_terminal, plus MT5 edge + execution worker
+./dev up full          # execution profile + q_terminal
+./dev status           # concise stack overview
+./dev logs publisher   # follow logs (aliases: api, outbox, postgres, mt5, …)
+./dev restart api
+./dev down             # stop Q-owned Docker containers and systemd units
+```
+
+`./dev` starts Postgres and Redis via Docker Compose (`q-dev` project) and
+supervises the API, outbox relay, market-data publisher, execution worker and
+MT5 (Wine) services as systemd user units against those Docker endpoints. Live
+quotes and bars need Wine and a logged-in MT5 terminal (see
+`q_backend/gateway/setup_wine.sh`); without them the terminal shows history only
+and the publisher waits for the gateway. `q_terminal` defaults to `PETR4`/`M1`;
+override with `Q_TERMINAL_SYMBOL`/`Q_TERMINAL_TIMEFRAME` (values must be in
+`Q_STREAM_SYMBOLS`/`Q_STREAM_BAR_TIMEFRAMES` in `~/.config/q/backend.env`). **Ctrl+C** on `q_terminal` stops only the
+terminal; backends keep running until `./dev down`.
+
+Use `./research` instead when iterating on the Research UI and backtests — it
+tears the stack down on Ctrl+C and requires CUDA.
+
 ### Research / Backtests (one command)
 
 From the workspace root, with Docker running and an NVIDIA GPU available:

@@ -22,6 +22,14 @@ small meta-repo; the product code lives in independent git repositories inside i
   `--cgroup-parent`. Remote CI is unaffected (slices are absent on hosted runners).
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
+- `./dev` is the canonical local development launcher for `q_terminal` and the
+  execution stack. Docker Compose (`q-dev` project) provides Postgres and Redis;
+  systemd user units supervise the API, outbox relay, market-data publisher, MT5
+  terminal and gateway (Wine), and, for `./dev up execution|full`, the MT5 edge and
+  execution worker. `q_terminal` launches in the
+  foreground and is not supervised. Ctrl+C on `q_terminal` does not tear down
+  infrastructure; use `./dev down` to stop Q-owned Docker containers and systemd
+  units. Prefer `./dev up terminal` over manual compose/systemctl steps.
 - `./research` starts the Research/Backtests stack and tears it down on Ctrl+C.
   Prefer it over manual compose/UI steps when iterating on backtests. It
   fail-closes if CUDA is unavailable.
@@ -46,7 +54,7 @@ small meta-repo; the product code lives in independent git repositories inside i
   through it; use the real repository paths.
 - `.worktrees/` holds task worktrees created by `./work start --worktree`.
 - The `q/` meta-repo itself tracks only workspace files (`AGENTS.md`, `README.md`, `docs/`,
-  `tools/`, `work`, `q-workspace/`).
+  `tools/`, `work`, `dev`, `research`, `q-workspace/`).
 
 ## Project board
 
