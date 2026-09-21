@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 from helpers import git, item, write
 from qwork.cli import main
 
@@ -48,6 +50,41 @@ def test_start_with_worktree(make_ctx):
     [argv] = ctx.execvp.calls
     assert argv[0] == "agy"
     assert f"Working directory: `.worktrees/q_backend/{BRANCH}`" in argv[-1]
+
+
+@pytest.mark.parametrize("target_rel", ["target", "src-tauri/target"])
+def test_worktree_uses_separate_target_beside_checkout_target(make_ctx, target_rel):
+    ctx, fake = make_ctx([q010()])
+    checkout_target = ctx.workspace / "q_backend" / target_rel
+    nvme_target = ctx.workspace.parent / "build" / "targets" / "q_backend"
+    nvme_target.mkdir(parents=True)
+    checkout_target.parent.mkdir(parents=True, exist_ok=True)
+    checkout_target.symlink_to(nvme_target, target_is_directory=True)
+
+    assert main(["start", "Q-010", "--agent", "antigravity", "--worktree"], ctx) == 0
+
+    worktree_target = ctx.workspace / ".worktrees/q_backend" / BRANCH / target_rel
+    expected = nvme_target.parent / f"q_backend-{BRANCH}"
+    assert worktree_target.is_symlink()
+    assert worktree_target.resolve() == expected
+    assert expected.is_dir()
+    assert checkout_target.resolve() == nvme_target
+
+
+def test_resume_refuses_existing_local_target_when_checkout_uses_external_target(make_ctx):
+    ctx, fake = make_ctx([q010("In Progress")])
+    repo = ctx.workspace / "q_backend"
+    nvme_target = ctx.workspace.parent / "build" / "targets" / "q_backend"
+    nvme_target.mkdir(parents=True)
+    (repo / "target").symlink_to(nvme_target, target_is_directory=True)
+    git(repo, "branch", BRANCH)
+    worktree = ctx.workspace / ".worktrees/q_backend" / BRANCH
+    git(repo, "worktree", "add", "--quiet", str(worktree), BRANCH)
+    (worktree / "target").mkdir()
+
+    assert main(["start", "Q-010", "--agent", "antigravity", "--worktree"], ctx) == 1
+    assert "already has a local Cargo target" in ctx.err.getvalue()
+    assert ctx.execvp.calls == []
 
 
 def test_unfinished_dependency_blocks_start(make_ctx):

@@ -119,6 +119,10 @@ It also runs `git fetch origin development` and warns (without stopping) if your
 1. Creates branch `<ID>-<title-slug>` from local `development` (e.g. `Q-010-transactional-outbox`),
   unless it's resuming.
 2. Checks the branch out in the repository, or with `--worktree` creates the worktree.
+   If the checkout's Cargo `target/` (or Tauri `src-tauri/target/`) is a symlink,
+   worktree mode creates a separate target directory beside its destination and
+   links the worktree to it. An existing local worktree target must be moved
+   before resuming, so Cargo cannot silently build on the checkout's filesystem.
 3. Sets the task to `In Progress` (skipped when resuming).
 4. Launches the agent from the workspace root with the rendered prompt, in a clean environment
   (the launcher's own Python virtualenv is removed from `PATH`).

@@ -39,6 +39,27 @@ def _launch_env(env: Mapping[str, str]) -> dict[str, str]:
     return clean
 
 
+def _cargo_target_links(repo: Path, worktree: Path) -> list[tuple[Path, Path]]:
+    """Mirror checkout Cargo target links with isolated storage per worktree."""
+    links = []
+    for relative in (Path("target"), Path("src-tauri/target")):
+        checkout_target = repo / relative
+        if not checkout_target.is_symlink():
+            continue
+        source = checkout_target.resolve()
+        if not source.is_dir():
+            raise QworkError(f"{checkout_target} points to a missing Cargo target directory")
+        worktree_target = worktree / relative
+        destination = source.parent / f"{source.name}-{worktree.name}"
+        if worktree_target.is_symlink():
+            if worktree_target.resolve() != destination:
+                raise QworkError(f"{worktree_target} points to a different Cargo target directory")
+        elif worktree_target.exists():
+            raise QworkError(f"{worktree_target} already has a local Cargo target; move it before resuming")
+        links.append((worktree_target, destination))
+    return links
+
+
 def start(
     ctx: Context,
     task_id: str,
@@ -80,6 +101,7 @@ def start(
         workdir = wt
         if wt.exists() and Git(wt, ctx.run).current_branch() != task.branch:
             raise QworkError(f"{rel(wt)} exists but is not on {task.branch}")
+        target_links = _cargo_target_links(files.repo, wt)
     else:
         workdir = files.repo
         if git.is_dirty():
@@ -136,6 +158,11 @@ def start(
     if worktree:
         if not wt.exists():
             git.add_worktree(wt, task.branch)
+        for link, destination in target_links:
+            destination.mkdir(parents=True, exist_ok=True)
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if not link.is_symlink():
+                link.symlink_to(destination, target_is_directory=True)
     else:
         git.checkout(task.branch)
     if not resuming:
