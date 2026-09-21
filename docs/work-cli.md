@@ -121,8 +121,10 @@ It also runs `git fetch origin development` and warns (without stopping) if your
 2. Checks the branch out in the repository, or with `--worktree` creates the worktree.
    If the checkout's Cargo `target/` (or Tauri `src-tauri/target/`) is a symlink,
    worktree mode creates a separate target directory beside its destination and
-   links the worktree to it. An existing local worktree target must be moved
-   before resuming, so Cargo cannot silently build on the checkout's filesystem.
+   links the worktree to it. It also writes an ignored worktree-local
+   `.cargo/config.toml` with that target path, so direct Cargo commands keep
+   using external storage if `cargo clean` removes the symlink. An existing
+   local worktree target must be moved before resuming.
 3. Sets the task to `In Progress` (skipped when resuming).
 4. Launches the agent from the workspace root with the rendered prompt, in a clean environment
   (the launcher's own Python virtualenv is removed from `PATH`).

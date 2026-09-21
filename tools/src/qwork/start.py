@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from collections.abc import Mapping
@@ -58,6 +59,23 @@ def _cargo_target_links(repo: Path, worktree: Path) -> list[tuple[Path, Path]]:
             raise QworkError(f"{worktree_target} already has a local Cargo target; move it before resuming")
         links.append((worktree_target, destination))
     return links
+
+
+def _configure_cargo_target(repo: Path, worktree: Path, destination: Path) -> None:
+    """Keep Cargo on external storage even if `cargo clean` removes target/ links."""
+    config = worktree / ".cargo/config.toml"
+    contents = f"[build]\ntarget-dir = {json.dumps(str(destination))}\n"
+    if config.exists() and config.read_text() != contents:
+        raise QworkError(f"{config} already configures Cargo differently")
+    exclude = repo / ".git/info/exclude"
+    pattern = "/.cargo/config.toml"
+    existing = exclude.read_text() if exclude.exists() else ""
+    if pattern not in existing.splitlines():
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as stream:
+            stream.write(f"\n{pattern}\n")
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(contents)
 
 
 def start(
@@ -163,6 +181,8 @@ def start(
             link.parent.mkdir(parents=True, exist_ok=True)
             if not link.is_symlink():
                 link.symlink_to(destination, target_is_directory=True)
+        if target_links:
+            _configure_cargo_target(files.repo, wt, target_links[0][1])
     else:
         git.checkout(task.branch)
     if not resuming:

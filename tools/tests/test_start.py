@@ -63,12 +63,15 @@ def test_worktree_uses_separate_target_beside_checkout_target(make_ctx, target_r
 
     assert main(["start", "Q-010", "--agent", "antigravity", "--worktree"], ctx) == 0
 
-    worktree_target = ctx.workspace / ".worktrees/q_backend" / BRANCH / target_rel
+    worktree = ctx.workspace / ".worktrees/q_backend" / BRANCH
+    worktree_target = worktree / target_rel
     expected = nvme_target.parent / f"q_backend-{BRANCH}"
     assert worktree_target.is_symlink()
     assert worktree_target.resolve() == expected
     assert expected.is_dir()
     assert checkout_target.resolve() == nvme_target
+    assert (worktree / ".cargo/config.toml").read_text() == f'[build]\ntarget-dir = "{expected}"\n'
+    assert git(worktree, "check-ignore", ".cargo/config.toml").strip() == ".cargo/config.toml"
 
 
 def test_resume_refuses_existing_local_target_when_checkout_uses_external_target(make_ctx):
