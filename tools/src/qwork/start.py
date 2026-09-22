@@ -10,6 +10,7 @@ from pathlib import Path
 
 from qwork.agents import AGENTS, build_command
 from qwork.board import DONE, IN_PROGRESS, TODO
+from qwork.confine import build_env, confine
 from qwork.context import Context
 from qwork.errors import QworkError
 from qwork.repo import Git, task_files, worktree_path
@@ -152,6 +153,9 @@ def start(
     launch = build_command(agent, prompt, effort, model)
     if launch.notice:
         print(f"work: {launch.notice}", file=ctx.err)
+    argv, confine_notice = confine(launch.argv, ctx.which)
+    if confine_notice:
+        print(f"work: warning: {confine_notice}", file=ctx.err)
 
     if dry_run:
         actions = []
@@ -164,7 +168,7 @@ def start(
             actions.append(f"check out {task.branch} in {task.repo}")
         if not resuming:
             actions.append(f"set {task.id} to '{IN_PROGRESS}'")
-        actions.append(f"launch: {shlex.join(launch.argv[:-1])} <prompt>")
+        actions.append(f"launch: {shlex.join(argv[:-1])} <prompt>")
         print("Dry run — no changes made. Would:", file=ctx.out)
         for action in actions:
             print(f"  - {action}", file=ctx.out)
@@ -190,9 +194,9 @@ def start(
 
     print(f"work: {task.id} on {task.branch} in {rel(workdir)}; launching {agent}", file=ctx.err)
     os.chdir(ctx.workspace)
-    env = _launch_env(os.environ)
+    env = build_env(_launch_env(os.environ))
     try:
-        ctx.execvp(launch.argv[0], launch.argv, env)
+        ctx.execvp(argv[0], argv, env)
     except OSError as exc:
         raise QworkError(f"failed to launch '{agent}': {exc}") from None
     return 0

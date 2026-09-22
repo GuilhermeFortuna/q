@@ -19,7 +19,7 @@ def test_start_todo_in_branch_mode(make_ctx):
     assert git(repo, "branch", "--show-current").strip() == BRANCH
     assert fake.status_edits() == [("PVTI_Q-010", "In Progress")]
     [argv] = ctx.execvp.calls
-    assert argv[:3] == ["claude", "--effort", "medium"]
+    assert argv[:5] == ["slice-run", "ai-agents", "claude", "--effort", "medium"]
     assert "q_backend/docs/development/plans/Q-010-transactional-outbox-plan.md" in argv[-1]
     assert "Working directory: `q_backend`" in argv[-1]
     assert "Resuming" not in argv[-1]
@@ -36,7 +36,7 @@ def test_dry_run_changes_nothing(make_ctx):
     out = ctx.out.getvalue()
     assert "Dry run" in out
     assert f"create branch {BRANCH} from development" in out
-    assert "launch: codex -m gpt-5.6-terra -c model_reasoning_effort=high <prompt>" in out
+    assert "launch: slice-run ai-agents codex -m gpt-5.6-terra -c model_reasoning_effort=high <prompt>" in out
     assert f"{ctx.workspace}/work board set Q-010 in-review" in out
     assert f"relative to the workspace root `{ctx.workspace}`" in out
 
@@ -48,7 +48,7 @@ def test_start_with_worktree(make_ctx):
     assert git(path, "branch", "--show-current").strip() == BRANCH
     assert git(ctx.workspace / "q_backend", "branch", "--show-current").strip() == "development"
     [argv] = ctx.execvp.calls
-    assert argv[0] == "agy"
+    assert argv[:3] == ["slice-run", "ai-agents", "agy"]
     assert f"Working directory: `.worktrees/q_backend/{BRANCH}`" in argv[-1]
 
 
@@ -191,3 +191,39 @@ def test_warns_when_development_is_behind_origin(make_ctx):
     git(repo, "reset", "--quiet", "--hard", "HEAD~1")
     assert main(["start", "Q-010", "--agent", "claude", "--dry-run"], ctx) == 0
     assert "1 commit(s) behind origin/development" in ctx.err.getvalue()
+
+
+def test_agent_runs_inside_the_ai_agents_slice(make_ctx):
+    ctx, fake = make_ctx([q010()])
+    assert main(["start", "Q-010", "--agent", "cursor"], ctx) == 0
+    [argv] = ctx.execvp.calls
+    assert argv[:3] == ["slice-run", "ai-agents", "agent"]
+    assert "unconfined" not in ctx.err.getvalue()
+
+
+def test_missing_slice_run_warns_and_launches_unconfined(make_ctx):
+    ctx, fake = make_ctx([q010()])
+    ctx.which = lambda name: None if name == "slice-run" else f"/usr/bin/{name}"
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 0
+    [argv] = ctx.execvp.calls
+    assert argv[0] == "claude"
+    assert "outside ai-agents.slice" in ctx.err.getvalue()
+
+
+def test_build_parallelism_is_capped(make_ctx, monkeypatch):
+    ctx, fake = make_ctx([q010()])
+    for name in ("CARGO_BUILD_JOBS", "MAKEFLAGS", "CMAKE_BUILD_PARALLEL_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 0
+    [env] = ctx.execvp.envs
+    assert env["CARGO_BUILD_JOBS"] == "6"
+    assert env["MAKEFLAGS"] == "-j6"
+    assert env["CMAKE_BUILD_PARALLEL_LEVEL"] == "6"
+
+
+def test_explicit_build_parallelism_is_kept(make_ctx, monkeypatch):
+    ctx, fake = make_ctx([q010()])
+    monkeypatch.setenv("CARGO_BUILD_JOBS", "2")
+    assert main(["start", "Q-010", "--agent", "claude"], ctx) == 0
+    [env] = ctx.execvp.envs
+    assert env["CARGO_BUILD_JOBS"] == "2"
