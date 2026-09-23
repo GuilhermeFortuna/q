@@ -447,8 +447,15 @@ launch_ui() {
 
   # NVIDIA + WebKitGTK workarounds for the Tauri shell (no-ops for browser mode).
   # See https://v2.tauri.app/develop/debug/linux-graphics/
+  # On WebKitGTK 2.50–2.52, WEBKIT_DISABLE_DMABUF_RENDERER=1 leaves
+  # AcceleratedBackingStore null and segfaults when the first compositing layer
+  # paints (NVIDIA + Wayland). FORCE_SHM keeps shared-memory transport instead.
+  # https://bugs.webkit.org/show_bug.cgi?id=280210
   export __NV_DISABLE_EXPLICIT_SYNC="${__NV_DISABLE_EXPLICIT_SYNC:-1}"
-  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+  if [[ -d /sys/module/nvidia ]]; then
+    export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-0}"
+    export WEBKIT_DMABUF_RENDERER_FORCE_SHM="${WEBKIT_DMABUF_RENDERER_FORCE_SHM:-1}"
+  fi
 
   case "$ui_mode" in
     tauri)
