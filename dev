@@ -32,8 +32,8 @@ GATEWAY_HEALTH_URL="${Q_DEV_GATEWAY_HEALTH_URL:-${GATEWAY_URL}/v1/health}"
 GATEWAY_ENV_FILE="${HOME}/.config/mt5-gateway/mt5-gateway.env"
 EDGE_HEALTH_URL="${Q_DEV_EDGE_HEALTH_URL:-http://127.0.0.1:18813/v1/health}"
 
-WAIT_ATTEMPTS="${Q_DEV_WAIT_ATTEMPTS:-45}"
-WAIT_INTERVAL="${Q_DEV_WAIT_INTERVAL:-2}"
+WAIT_ATTEMPTS="${Q_DEV_WAIT_ATTEMPTS:-90}"
+WAIT_INTERVAL="${Q_DEV_WAIT_INTERVAL:-0.5}"
 STATE_DIR="${Q_DEV_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/q-dev}"
 
 # Set by ensure_backend_env_file when backend.env content changes; running
@@ -76,8 +76,8 @@ Environment:
   Q_DEV_GATEWAY_URL      MT5 gateway base URL (default: http://127.0.0.1:18812)
   Q_TERMINAL_SYMBOL      q_terminal symbol (default: PETR4; must be in Q_STREAM_SYMBOLS)
   Q_TERMINAL_TIMEFRAME   q_terminal timeframe (default: M1; must be in Q_STREAM_BAR_TIMEFRAMES)
-  Q_DEV_WAIT_ATTEMPTS    Readiness poll attempts (default: 45)
-  Q_DEV_WAIT_INTERVAL    Seconds between polls (default: 2)
+  Q_DEV_WAIT_ATTEMPTS    Readiness poll attempts (default: 90)
+  Q_DEV_WAIT_INTERVAL    Seconds between polls (default: 0.5)
 
 See also:
   ./research   Research/backtests stack (tears down on Ctrl+C)
@@ -361,17 +361,26 @@ execution_worker_process_ready() {
 }
 
 execution_worker_heartbeat_ready() {
-  local status
-  status="$(exec_health_field "print(data.get('worker_status', 'offline'), end='')")"
-  [[ "$status" == "healthy" || "$status" == "stale" ]]
+  need python3
+  exec_health_json | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin)
+    sys.exit(0 if d.get('worker_status') in ('healthy', 'stale') else 1)
+except Exception:
+    sys.exit(1)" 2>/dev/null
 }
 
 execution_live_available() {
-  local worker_status edge_reachable edge_connected
-  worker_status="$(exec_health_field "print(data.get('worker_status', 'offline'), end='')")"
-  edge_reachable="$(exec_health_field "print(data.get('edge', {}).get('reachable', False), end='')")"
-  edge_connected="$(exec_health_field "print(data.get('edge', {}).get('mt5_connected', False), end='')")"
-  [[ "$worker_status" == "healthy" ]] && [[ "$edge_reachable" == "True" ]] && [[ "$edge_connected" == "True" ]]
+  need python3
+  exec_health_json | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin)
+    ok = (d.get('worker_status') == 'healthy' and
+          d.get('edge', {}).get('reachable') is True and
+          d.get('edge', {}).get('mt5_connected') is True)
+    sys.exit(0 if ok else 1)
+except Exception:
+    sys.exit(1)" 2>/dev/null
 }
 
 # --- readiness checks ---
@@ -505,7 +514,7 @@ wait_for() {
   local label="$1"
   local hint="$2"
   local check_fn="$3"
-  local i elapsed
+  local i start elapsed
 
   if "$check_fn"; then
     echo "$label: already ready"
@@ -513,16 +522,18 @@ wait_for() {
   fi
 
   echo "waiting for $label..."
+  start=$SECONDS
   for ((i = 1; i <= WAIT_ATTEMPTS; i++)); do
+    sleep "$WAIT_INTERVAL"
     if "$check_fn"; then
-      elapsed=$((i * WAIT_INTERVAL))
+      elapsed=$((SECONDS - start))
       echo "$label: ready (${elapsed}s)"
       return 0
     fi
-    sleep "$WAIT_INTERVAL"
   done
 
-  echo "error: $label did not become ready within $((WAIT_ATTEMPTS * WAIT_INTERVAL))s" >&2
+  elapsed=$((SECONDS - start))
+  echo "error: $label did not become ready within ${elapsed}s" >&2
   [[ -n "$hint" ]] && echo "hint: $hint" >&2
   return 1
 }
@@ -652,6 +663,13 @@ start_profile() {
   # Seed MT5 units and env files first so backend.env can mirror the gateway token.
   if have_wine; then
     ensure_mt5_units
+    # Pre-start Wine/MT5 services concurrently with Docker infra and Python backend.
+    local -a mt5_early=("$(mt5_unit mt5)" "$(mt5_unit gateway)")
+    if [[ "$profile" == "execution" || "$profile" == "full" ]]; then
+      mt5_early+=("$(mt5_unit edge)")
+    fi
+    echo "==> Pre-starting MT5 Wine services in background..."
+    systemctl --user start "${mt5_early[@]}" || true
   fi
   start_terminal_backend
   start_market_stack
