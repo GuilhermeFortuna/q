@@ -59,14 +59,19 @@ setup_workspace() {
   local ws="$1"
   mkdir -p \
     "$ws/bin" \
+    "$ws/home" \
     "$ws/q_backend/docker/metatrader5-stub/MetaTrader5" \
     "$ws/q_backend/src" \
     "$ws/q_backend/data" \
     "$ws/q_frontend" \
+    "$ws/tools" \
     "$ws/state"
 
   cp "$RESEARCH_SRC" "$ws/research"
   chmod +x "$ws/research"
+  if [[ -f "$ROOT/tools/research-gateway-compose.yml" ]]; then
+    cp "$ROOT/tools/research-gateway-compose.yml" "$ws/tools/research-gateway-compose.yml"
+  fi
 
   # Minimal image-defining inputs
   cat >"$ws/q_backend/Dockerfile" <<'EOF'
@@ -181,6 +186,7 @@ EOF
   cat >"$ws/q_backend/.venv/bin/uvicorn" <<'EOF'
 #!/usr/bin/env bash
 echo "uvicorn $*" >>"${Q_TEST_STATE}/host.log"
+echo "database=$Q_DATABASE_URL redis=$Q_REDIS_URL lake=$Q_DATA_LAKE_ROOT" >>"${Q_TEST_STATE}/host.log"
 sleep 5
 EOF
   cat >"$ws/q_backend/.venv/bin/worker" <<'EOF'
@@ -369,6 +375,7 @@ run_research() {
     cd "$ws"
     export Q_TEST_STATE="$ws/state"
     export Q_RESEARCH_ROOT="$ws"
+    export HOME="$ws/home"
     export PATH
     PATH="$(test_path "$ws")"
     # Make UI exit quickly: pnpm tauri:dev returns; research waits on it
@@ -649,6 +656,7 @@ test_host_migration_failure_is_reported() {
   out="$(
     cd "$ws"
     export Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")" Q_FAKE_ALEMBIC_FAIL=1
+    export HOME="$ws/home"
     timeout 10 "$ws/research" 2>&1 || true
   )"
   assert_contains "migration failure names the command" "alembic upgrade head failed" "$out"
@@ -766,6 +774,106 @@ test_teardown_stops_the_relay() {
   rm -rf "$ws"
 }
 
+test_research_owns_separate_runtime() {
+  local ws log host env_file
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_research "$ws" >/dev/null 2>&1 || true
+  log="$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  host="$(cat "$ws/state/host.log" 2>/dev/null || true)"
+  env_file="$(cat "$ws/q_frontend/.env" 2>/dev/null || true)"
+  assert_contains "research starts its own Compose project" "-p q-research up" "$log"
+  assert_not_contains "research never stops dev Compose project" "-p q-dev" "$log"
+  assert_contains "research host API uses its own database" "127.0.0.1:5435/q" "$host"
+  assert_contains "research host API uses its own Redis" "127.0.0.1:6381/0" "$host"
+  assert_contains "research host API uses its own lake" "$ws/q_backend/data/research/lake" "$host"
+  assert_contains "research UI uses its own API" "VITE_API_BASE_URL=http://127.0.0.1:8001" "$env_file"
+  rm -rf "$ws"
+}
+
+test_research_connects_to_installed_mt5_gateway() {
+  local ws result
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  mkdir -p "$ws/home/.config/systemd/user" "$ws/home/.config/mt5-gateway"
+  : >"$ws/home/.config/systemd/user/mt5-gateway.service"
+  cat >"$ws/home/.config/mt5-gateway/mt5-gateway.env" <<'EOF'
+MT5_GATEWAY_HOST=127.0.0.1
+MT5_GATEWAY_PORT=18812
+MT5_GATEWAY_TOKEN=test-token
+EOF
+  cat >"$ws/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "systemctl $*" >>"${Q_TEST_STATE}/systemctl.log"
+EOF
+  cat >"$ws/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "curl $*" >>"${Q_TEST_STATE}/curl.log"
+printf '{"status":"ok","schema_version":"1.0","mt5_connected":true}\n'
+EOF
+  chmod +x "$ws/bin/systemctl" "$ws/bin/curl"
+  result="$(
+    export HOME="$ws/home" Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws"
+    export PATH="$(test_path "$ws")"
+    source "$ws/research"
+    prepare_mt5_gateway
+    printf 'url=%s token=%s\n' "${Q_MT5_GATEWAY_URL:-}" "${Q_MT5_GATEWAY_TOKEN:-}"
+  )"
+  assert_contains "research starts the shared gateway" "start mt5-gateway.service" "$(cat "$ws/state/systemctl.log" 2>/dev/null || true)"
+  assert_contains "research gives backend the gateway URL" "url=http://127.0.0.1:18812" "$result"
+  assert_contains "research gives backend the gateway token" "token=test-token" "$result"
+  rm -rf "$ws"
+}
+
+test_container_rejects_loopback_mt5_gateway() {
+  local ws result
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  result="$(
+    export HOME="$ws/home" Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws"
+    export Q_MT5_GATEWAY_URL=http://127.0.0.1:18812
+    export PATH="$(test_path "$ws")"
+    source "$ws/research"
+    MODE=container
+    prepare_mt5_gateway 2>&1
+  )" || true
+  assert_contains "container mode explains why the local gateway is unreachable" \
+    "use ./research --host" "$result"
+  rm -rf "$ws"
+}
+
+test_container_passes_remote_gateway_to_backend_and_worker() {
+  local ws log
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  cat >"$ws/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"status":"ok","schema_version":"1.0","mt5_connected":true}\n'
+EOF
+  chmod +x "$ws/bin/curl"
+  Q_MT5_GATEWAY_URL=http://gateway.example:18812 run_research "$ws" --container >/dev/null 2>&1 || true
+  log="$(cat "$ws/state/docker.log" 2>/dev/null || true)"
+  assert_contains "container mode loads the gateway environment override" \
+    "-f $ws/tools/research-gateway-compose.yml" "$log"
+  rm -rf "$ws"
+}
+
+test_mt5_off_clears_inherited_gateway() {
+  local ws result
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  result="$(
+    export HOME="$ws/home" Q_TEST_STATE="$ws/state" Q_RESEARCH_ROOT="$ws"
+    export Q_RESEARCH_MT5=off Q_MT5_GATEWAY_URL=http://gateway.example:18812
+    export PATH="$(test_path "$ws")"
+    source "$ws/research"
+    prepare_mt5_gateway
+    printf '%s' "${Q_MT5_GATEWAY_URL:-unset}"
+  )"
+  assert_eq "local-only mode clears an inherited gateway URL" unset "$result"
+  rm -rf "$ws"
+}
+
 main() {
   [[ -x "$RESEARCH_SRC" ]] || die "missing executable $RESEARCH_SRC"
 
@@ -789,6 +897,11 @@ main() {
   test_host_mode_starts_the_outbox_relay
   test_container_mode_runs_the_relay_on_the_shared_image
   test_teardown_stops_the_relay
+  test_research_owns_separate_runtime
+  test_research_connects_to_installed_mt5_gateway
+  test_container_rejects_loopback_mt5_gateway
+  test_container_passes_remote_gateway_to_backend_and_worker
+  test_mt5_off_clears_inherited_gateway
 
   echo
   echo "passed=$PASS failed=$FAIL"

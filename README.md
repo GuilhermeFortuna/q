@@ -213,8 +213,8 @@ override with `Q_TERMINAL_SYMBOL`/`Q_TERMINAL_TIMEFRAME` (values must be in
 `Q_STREAM_SYMBOLS`/`Q_STREAM_BAR_TIMEFRAMES` in `~/.config/q/backend.env`). **Ctrl+C** on `q_terminal` stops only the
 terminal; backends keep running until `./dev down`.
 
-Use `./research` instead when iterating on the Research UI and backtests — it
-tears the stack down on Ctrl+C and requires CUDA.
+Use `./research` when iterating on the Research UI and backtests. It can run
+alongside `./dev`; Ctrl+C tears down only the research stack. Research requires CUDA.
 
 ### Research / Backtests (one command)
 
@@ -226,15 +226,19 @@ From the workspace root, with Docker running and an NVIDIA GPU available:
 ./research --container --rebuild    # force one image rebuild
 ```
 
-Both modes fail-closed CUDA-probe before anything starts, point the Research UI at the
-live API (`VITE_ENABLE_MSW=false`), and launch `pnpm tauri:dev`. **Ctrl+C** stops the UI
-and the backend and runs `docker compose … down` without deleting volumes, images, build
-cache, or host environments.
+Both modes fail-closed CUDA-probe before anything starts, point the Research UI at its
+API (`http://127.0.0.1:8001`, `VITE_ENABLE_MSW=false`), and launch `pnpm tauri:dev`.
+Research uses its own `q-research` Compose project, Postgres on port `5435`, Redis on
+`6381`, and writable data in `q_backend/data/research/`. The `./dev` stack keeps
+`q-dev`, ports `5434`/`6380`/`8000`, and `q_backend/data/`. **Ctrl+C** stops the
+Research UI and backend, and tears down only `q-research` containers without
+deleting volumes, images, build cache, or host environments. Use `./dev down`
+separately to stop the execution stack.
 
 #### Host mode (default)
 
 Containerizes Postgres and Redis only. The API and Dramatiq worker run from
-`q_backend/.venv` (`uv sync --frozen`, then `alembic upgrade head`), and torch talks to
+`q_backend/.venv` (`uv sync --frozen --no-dev`, then `alembic upgrade head`), and torch talks to
 the GPU directly, so the **NVIDIA Container Toolkit is not required**. No backend image
 is built or exported and no packages are downloaded when the venv is already in sync, so
 a warm start is effectively instant.
@@ -283,9 +287,20 @@ docker run --rm --gpus all q-backend:dev python -c "import torch; print(torch.cu
 Run only one neural-training job at a time on a single consumer GPU. Native CPU-only
 backend work remains available outside `./research` (`Q_TORCH_DEVICE` defaults to `cpu`).
 
-Host market/lake data lives in `q_backend/data/` — read directly in host mode, and
-bind-mounted into the containers in container mode, so both modes share it.
-Host-mode API and worker logs are written to `q_backend/data/logs/`.
+Research market/lake data lives in `q_backend/data/research/` — read directly in
+host mode and bind-mounted into containers in container mode. Existing files in
+`q_backend/data/market/` or `q_backend/data/lake/` are not copied automatically.
+In host mode, `./research` starts the installed MT5 gateway and terminal through
+the shared systemd user service, then gives the gateway URL and token to the API
+and worker. Bars and ticks fetched for backtests are cached in Research's market
+store. Stopping Research leaves the shared gateway running. Set
+`Q_RESEARCH_MT5=off` to skip gateway startup, or `Q_MT5_GATEWAY_URL` to use a
+different gateway. Container mode needs a gateway reachable from containers;
+use `./research --host` with the local loopback gateway.
+Host-mode API and worker logs are written to `q_backend/data/research/logs/`.
+The `Q_RESEARCH_COMPOSE_PROJECT`, `Q_RESEARCH_PG_PORT`, `Q_RESEARCH_REDIS_PORT`,
+`Q_RESEARCH_API_PORT`, and `Q_RESEARCH_DATA_DIR` variables override these defaults
+when their ports or data path are already in use.
 
 ### Manual (native) backend
 

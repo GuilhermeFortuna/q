@@ -25,6 +25,8 @@ COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/dock
 PG_PORT="${Q_DEV_PG_PORT:-5434}"
 REDIS_PORT="${Q_DEV_REDIS_PORT:-6380}"
 API_PORT="${Q_DEV_API_PORT:-8000}"
+export Q_COMPOSE_PG_PORT="$PG_PORT" Q_COMPOSE_REDIS_PORT="$REDIS_PORT"
+export Q_COMPOSE_DATA_DIR="$BACKEND_DIR/data"
 API_HEALTH_URL="${Q_DEV_HEALTH_URL:-http://127.0.0.1:${API_PORT}/api/v1/system/health}"
 EXEC_HEALTH_URL="${Q_DEV_EXEC_HEALTH_URL:-http://127.0.0.1:${API_PORT}/api/v1/execution/health}"
 GATEWAY_URL="${Q_DEV_GATEWAY_URL:-http://127.0.0.1:18812}"
@@ -154,6 +156,22 @@ check_port() {
   (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
 }
 
+port_holder_hint() {
+  local port="$1" service="$2"
+  local holder project name
+  holder="$(docker ps --filter "publish=${port}" \
+    --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null | head -1 || true)"
+  [[ -n "$holder" ]] || return 0
+  project="${holder%% *}"
+  name="${holder#* }"
+  if [[ -n "$project" && "$project" != "$COMPOSE_PROJECT" ]]; then
+    echo "hint: $name (compose project: $project) is still running — stop it with:" >&2
+    echo "      docker compose -p $project -f $BACKEND_DIR/docker-compose.yml stop $service" >&2
+    return 0
+  fi
+  echo "hint: stop the conflicting service, or run: docker compose -p $COMPOSE_PROJECT -f $BACKEND_DIR/docker-compose.yml stop $service" >&2
+}
+
 guard_port_conflicts() {
   local service port
   for service in postgres redis; do
@@ -161,7 +179,7 @@ guard_port_conflicts() {
     [[ "$service" == "redis" ]] && port="$REDIS_PORT"
     if check_port "$port" && ! docker_service_running "$service"; then
       echo "error: port $port is in use by a non-Q-dev container or process." >&2
-      echo "hint: stop the conflicting service, or run: docker compose -p $COMPOSE_PROJECT -f $BACKEND_DIR/docker-compose.yml stop $service" >&2
+      port_holder_hint "$port" "$service"
       exit 1
     fi
   done

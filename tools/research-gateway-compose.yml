@@ -1,0 +1,11 @@
+# Pass a configured remote MT5 data gateway to both Research data consumers.
+# The local Wine gateway binds loopback; use ./research --host for that case.
+services:
+  backend:
+    environment:
+      Q_MT5_GATEWAY_URL: ${Q_MT5_GATEWAY_URL:?}
+      Q_MT5_GATEWAY_TOKEN: ${Q_MT5_GATEWAY_TOKEN:-}
+  worker:
+    environment:
+      Q_MT5_GATEWAY_URL: ${Q_MT5_GATEWAY_URL:?}
+      Q_MT5_GATEWAY_TOKEN: ${Q_MT5_GATEWAY_TOKEN:-}

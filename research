@@ -28,8 +28,17 @@ set -euo pipefail
 ROOT="${Q_RESEARCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BACKEND_DIR="$ROOT/q_backend"
 FRONTEND_DIR="$ROOT/q_frontend"
-COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml")
-API_HEALTH_URL="${Q_RESEARCH_HEALTH_URL:-http://127.0.0.1:8000/api/v1/system/health}"
+COMPOSE_PROJECT="${Q_RESEARCH_COMPOSE_PROJECT:-q-research}"
+COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT")
+PG_PORT="${Q_RESEARCH_PG_PORT:-5435}"
+REDIS_PORT="${Q_RESEARCH_REDIS_PORT:-6381}"
+API_PORT="${Q_RESEARCH_API_PORT:-8001}"
+DATA_DIR="${Q_RESEARCH_DATA_DIR:-$BACKEND_DIR/data/research}"
+GATEWAY_ENV_FILE="${Q_RESEARCH_GATEWAY_ENV_FILE:-${HOME}/.config/mt5-gateway/mt5-gateway.env}"
+API_BASE_URL="http://127.0.0.1:${API_PORT}"
+API_HEALTH_URL="${Q_RESEARCH_HEALTH_URL:-${API_BASE_URL}/api/v1/system/health}"
+export Q_COMPOSE_PG_PORT="$PG_PORT" Q_COMPOSE_REDIS_PORT="$REDIS_PORT"
+export Q_COMPOSE_API_PORT="$API_PORT" Q_COMPOSE_DATA_DIR="$DATA_DIR"
 BACKEND_IMAGE="${Q_RESEARCH_BACKEND_IMAGE:-q-backend:dev}"
 FINGERPRINT_LABEL="dev.q.backend.research-fingerprint"
 # Upper bound on retained BuildKit cache, applied after a container-mode build.
@@ -79,6 +88,14 @@ Environment:
   Q_RESEARCH_MODE             host (default) | container
   Q_RESEARCH_BACKEND_IMAGE    Image tag for container mode (default: q-backend:dev)
   Q_RESEARCH_BUILD_CACHE_MAX  BuildKit cache cap applied after a build (default: 4GB)
+  Q_RESEARCH_COMPOSE_PROJECT  Compose project (default: q-research)
+  Q_RESEARCH_PG_PORT          Postgres host port (default: 5435)
+  Q_RESEARCH_REDIS_PORT       Redis host port (default: 6381)
+  Q_RESEARCH_API_PORT         API host port (default: 8001)
+  Q_RESEARCH_DATA_DIR         Writable data root (default: q_backend/data/research)
+  Q_MT5_GATEWAY_URL           MT5 data gateway URL (default: local gateway service)
+  Q_MT5_GATEWAY_TOKEN         Token if the gateway requires one
+  Q_RESEARCH_MT5             auto (default) | off (skip gateway setup)
   Q_RESEARCH_HEALTH_URL       API health URL to poll
   Q_RESEARCH_ROOT             Workspace root override (tests only)
   Q_RESEARCH_UI               tauri (default) | browser
@@ -270,7 +287,7 @@ ensure_backend_venv() {
   echo "venv: syncing $BACKEND_DIR/.venv ..."
   # Idempotent and fast when already in sync. --frozen refuses to move uv.lock,
   # so the host environment matches the pinned dependency set exactly.
-  (cd "$BACKEND_DIR" && uv sync --frozen) \
+  (cd "$BACKEND_DIR" && uv sync --frozen --no-dev) \
     || die "uv sync failed in $BACKEND_DIR (verify: cd q_backend && uv sync --frozen)"
   [[ -x "$(venv_python)" ]] || die "missing interpreter $(venv_python) after uv sync"
 }
@@ -287,16 +304,83 @@ check_host_cuda() {
   echo "CUDA: ready ($out)"
 }
 
+gateway_env_value() {
+  local key="$1"
+  [[ -f "$GATEWAY_ENV_FILE" ]] || return 0
+  sed -n "s/^${key}=//p" "$GATEWAY_ENV_FILE" | tail -n1
+}
+
+gateway_health() {
+  local response
+  if [[ -n "${Q_MT5_GATEWAY_TOKEN:-}" ]]; then
+    response="$(curl -fsS --max-time 2 -H "X-Gateway-Token: $Q_MT5_GATEWAY_TOKEN" \
+      "$Q_MT5_GATEWAY_URL/v1/health" 2>/dev/null)" || return 1
+  else
+    response="$(curl -fsS --max-time 2 "$Q_MT5_GATEWAY_URL/v1/health" 2>/dev/null)" || return 1
+  fi
+  [[ "$response" =~ \"mt5_connected\"[[:space:]]*:[[:space:]]*true ]]
+}
+
+prepare_mt5_gateway() {
+  if [[ "${Q_RESEARCH_MT5:-auto}" == off ]]; then
+    unset Q_MT5_GATEWAY_URL Q_MT5_GATEWAY_TOKEN
+    return 0
+  fi
+  [[ "${Q_RESEARCH_MT5:-auto}" == auto ]] || die "Q_RESEARCH_MT5 must be auto or off"
+
+  local start_local_gateway=0
+  if [[ -z "${Q_MT5_GATEWAY_URL:-}" ]]; then
+    if [[ ! -f "${HOME}/.config/systemd/user/mt5-gateway.service" ]]; then
+      echo "warning: MT5 gateway unit is not installed; Research will use local data only" >&2
+      echo "hint: run q_backend/gateway/setup_wine.sh and configure mt5-gateway.service" >&2
+      return 0
+    fi
+    need systemctl
+    local gateway_host gateway_port
+    gateway_host="$(gateway_env_value MT5_GATEWAY_HOST)"
+    gateway_port="$(gateway_env_value MT5_GATEWAY_PORT)"
+    [[ -n "$gateway_host" ]] || gateway_host=127.0.0.1
+    [[ "$gateway_host" == 0.0.0.0 ]] && gateway_host=127.0.0.1
+    [[ -n "$gateway_port" ]] || gateway_port=18812
+    export Q_MT5_GATEWAY_URL="http://${gateway_host}:${gateway_port}"
+    if [[ -z "${Q_MT5_GATEWAY_TOKEN:-}" ]]; then
+      Q_MT5_GATEWAY_TOKEN="$(gateway_env_value MT5_GATEWAY_TOKEN)"
+      export Q_MT5_GATEWAY_TOKEN
+    fi
+    start_local_gateway=1
+  fi
+
+  if [[ "$MODE" == container && "$Q_MT5_GATEWAY_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+    die "the local MT5 gateway is unreachable from a container; use ./research --host or configure a remote gateway URL"
+  fi
+
+  if [[ "$start_local_gateway" -eq 1 ]]; then
+    echo "starting MT5 data gateway (shared with ./dev) ..."
+    systemctl --user start mt5-gateway.service || die "could not start mt5-gateway.service"
+  fi
+
+  echo "waiting for MT5 data gateway at $Q_MT5_GATEWAY_URL ..."
+  local attempt
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    if gateway_health; then
+      echo "MT5 data gateway connected"
+      return 0
+    fi
+    sleep 1
+  done
+  die "MT5 data gateway is not connected at $Q_MT5_GATEWAY_URL (check: journalctl --user -u mt5-gateway.service -n 50; broker login)"
+}
+
 # Environment shared by the host API and worker processes. Mirrors the
 # container-mode environment block in docker-compose.yml, with the published
 # host ports and absolute data roots.
 export_host_backend_env() {
-  export Q_DATABASE_URL="${Q_DATABASE_URL:-postgresql+psycopg://q:q@127.0.0.1:5434/q}"
-  export Q_REDIS_URL="${Q_REDIS_URL:-redis://127.0.0.1:6380/0}"
-  export Q_DATA_LAKE_ROOT="${Q_DATA_LAKE_ROOT:-$BACKEND_DIR/data/lake}"
-  export Q_MARKET_DATA_ROOT="${Q_MARKET_DATA_ROOT:-$BACKEND_DIR/data/market}"
-  export Q_TICK_CACHE_DIR="${Q_TICK_CACHE_DIR:-$BACKEND_DIR/data/tick_cache}"
-  export Q_RUNTIME_CONFIG_PATH="${Q_RUNTIME_CONFIG_PATH:-$BACKEND_DIR/data/runtime_config.json}"
+  export Q_DATABASE_URL="postgresql+psycopg://q:q@127.0.0.1:${PG_PORT}/q"
+  export Q_REDIS_URL="redis://127.0.0.1:${REDIS_PORT}/0"
+  export Q_DATA_LAKE_ROOT="$DATA_DIR/lake"
+  export Q_MARKET_DATA_ROOT="$DATA_DIR/market"
+  export Q_TICK_CACHE_DIR="$DATA_DIR/tick_cache"
+  export Q_RUNTIME_CONFIG_PATH="$DATA_DIR/runtime_config.json"
   export Q_WORKER_PROCESSES="${Q_WORKER_PROCESSES:-14}"
   export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
   export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
@@ -386,10 +470,7 @@ ensure_frontend_env() {
       cp "$FRONTEND_DIR/.env.example" "$env_file"
       echo "created $env_file from .env.example"
     else
-      cat >"$env_file" <<'EOF'
-VITE_API_BASE_URL=http://127.0.0.1:8000
-VITE_ENABLE_MSW=false
-EOF
+      printf 'VITE_API_BASE_URL=%s\nVITE_ENABLE_MSW=false\n' "$API_BASE_URL" >"$env_file"
       echo "created $env_file"
     fi
   fi
@@ -401,9 +482,9 @@ EOF
   fi
 
   if grep -q '^VITE_API_BASE_URL=' "$env_file"; then
-    sed -i 's|^VITE_API_BASE_URL=.*|VITE_API_BASE_URL=http://127.0.0.1:8000|' "$env_file"
+    sed -i "s|^VITE_API_BASE_URL=.*|VITE_API_BASE_URL=$API_BASE_URL|" "$env_file"
   else
-    printf 'VITE_API_BASE_URL=http://127.0.0.1:8000\n' >>"$env_file"
+    printf 'VITE_API_BASE_URL=%s\n' "$API_BASE_URL" >>"$env_file"
   fi
 }
 
@@ -425,6 +506,8 @@ cleanup() {
   stop_host_process "$RELAY_PID" "relay"
   stop_host_process "$API_PID" "API"
 
+  # Stop only the research project's containers.
+  "${COMPOSE[@]}" stop postgres redis 2>/dev/null || true
   # Stop containerized profile services; keep named volumes, images, and caches.
   "${COMPOSE[@]}" --profile containerized down --remove-orphans || true
   echo "Research stack stopped."
@@ -441,7 +524,7 @@ launch_ui() {
     echo "  venv:  $BACKEND_DIR/.venv"
     echo "  logs:  $LOG_DIR"
   fi
-  echo "  data:  $BACKEND_DIR/data"
+  echo "  data:  $DATA_DIR"
   echo "  Ctrl+C stops the UI and tears down containers."
   echo
 
@@ -499,9 +582,9 @@ main() {
   [[ -f "$BACKEND_DIR/docker-compose.yml" ]] || die "missing $BACKEND_DIR/docker-compose.yml"
 
   mkdir -p \
-    "$BACKEND_DIR/data/lake" \
-    "$BACKEND_DIR/data/market" \
-    "$BACKEND_DIR/data/tick_cache"
+    "$DATA_DIR/lake" \
+    "$DATA_DIR/market" \
+    "$DATA_DIR/tick_cache"
 
   ensure_frontend_env
 
@@ -513,6 +596,10 @@ main() {
   if [[ "$MODE" == "container" ]]; then
     ensure_backend_image
     check_worker_cuda
+    prepare_mt5_gateway
+    if [[ -n "${Q_MT5_GATEWAY_URL:-}" ]]; then
+      COMPOSE+=(-f "$ROOT/tools/research-gateway-compose.yml")
+    fi
 
     echo "starting Postgres, Redis, API, worker, and outbox relay ..."
     export Q_BACKEND_IMAGE="$BACKEND_IMAGE"
@@ -522,9 +609,10 @@ main() {
   else
     ensure_backend_venv
     check_host_cuda
+    prepare_mt5_gateway
     export_host_backend_env
 
-    LOG_DIR="$BACKEND_DIR/data/logs"
+    LOG_DIR="$DATA_DIR/logs"
     mkdir -p "$LOG_DIR"
 
     echo "starting Postgres and Redis ..."
@@ -534,7 +622,7 @@ main() {
 
     echo "starting host API, Dramatiq worker, and outbox relay ..."
     API_PID="$(start_host_process api "$BACKEND_DIR/.venv/bin/uvicorn" \
-      q_backend.api.main:app --host 127.0.0.1 --port 8000)"
+      q_backend.api.main:app --host 127.0.0.1 --port "$API_PORT")"
     WORKER_PID="$(start_host_process worker "$BACKEND_DIR/.venv/bin/worker")"
     # The transactional outbox relay publishes jobs.terminal events from Postgres
     # to Redis Streams, which is how the UI learns a job finished. Without it a
