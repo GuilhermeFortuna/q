@@ -1,6 +1,6 @@
 # Q-071 — Interactive dev shell — spec
 
-**Status:** Awaiting plan approval
+**Status:** Implemented
 **Owner:** `q/` workspace repository
 **Depends on:** Q-070
 

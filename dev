@@ -13,6 +13,7 @@
 #   ./dev logs <service>        # follow logs with aliases (e.g. api, research:api)
 #   ./dev restart <service>     # restart service by alias
 #   ./dev up terminal|full|exec # legacy profile start
+#   ./dev shell               # interactive dev> prompt
 #   ./dev --help
 
 set -euo pipefail
@@ -40,6 +41,20 @@ EDGE_HEALTH_URL="${Q_DEV_EDGE_HEALTH_URL:-http://127.0.0.1:18813/v1/health}"
 WAIT_ATTEMPTS="${Q_DEV_WAIT_ATTEMPTS:-90}"
 WAIT_INTERVAL="${Q_DEV_WAIT_INTERVAL:-0.5}"
 STATE_DIR="${Q_DEV_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/q-dev}"
+
+dev_follow() {
+  if [[ "${Q_DEV_SHELL_ACTIVE:-0}" == "1" ]]; then
+    "$@" || {
+      local rc=$?
+      if [[ $rc -eq 130 || $rc -eq 143 ]]; then
+        return 0
+      fi
+      return "$rc"
+    }
+  else
+    exec "$@"
+  fi
+}
 
 # Load Research helpers
 # shellcheck source=tools/dev/research.sh
@@ -70,6 +85,7 @@ Commands:
   ./dev logs <service>    Follow service logs (e.g. api, outbox, research:api, ...)
   ./dev restart <service> Restart service by alias (e.g. api, research:worker, ...)
   ./dev up <profile>      Legacy start: terminal | execution | full
+  ./dev shell             Interactive dev> prompt (exit does not stop stacks)
   ./dev --help            Show this help
 
 Modes for research:
@@ -1069,11 +1085,11 @@ cmd_logs() {
     terminal)
       local log="$STATE_DIR/terminal.log"
       [[ -f "$log" ]] || die "log not found: $log"
-      exec tail -f "$log"
+      dev_follow tail -f "$log"
       ;;
     postgres|redis)
       ensure_docker
-      exec "${COMPOSE[@]}" logs -f "$(compose_service "$svc")"
+      dev_follow "${COMPOSE[@]}" logs -f "$(compose_service "$svc")"
       ;;
     api|outbox|publisher|market|execution|mt5|terminal-mt5|gateway|edge)
       need journalctl
@@ -1081,7 +1097,7 @@ cmd_logs() {
       local unit
       unit="$(systemd_unit "$svc")"
       unit_installed "$unit" || die "$unit is not installed (run ./dev live or ./dev up terminal first)"
-      exec journalctl --user -u "$unit" -f
+      dev_follow journalctl --user -u "$unit" -f
       ;;
     *)
       die "logs not available for alias: $target"
@@ -1143,7 +1159,7 @@ cmd_restart() {
   esac
 }
 
-main() {
+dispatch_dev() {
   local cmd="${1:-all}"
   case "$cmd" in
     ""|all)
@@ -1182,6 +1198,17 @@ main() {
       die "unknown command: $cmd (try ./dev --help)"
       ;;
   esac
+}
+
+# shellcheck source=tools/dev/shell.sh
+source "$ROOT/tools/dev/shell.sh"
+
+main() {
+  if [[ "${1:-}" == "shell" ]]; then
+    cmd_shell
+    return 0
+  fi
+  dispatch_dev "$@"
 }
 
 main "$@"

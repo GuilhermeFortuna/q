@@ -74,6 +74,7 @@ setup_workspace() {
   chmod +x "$ws/research"
   cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
   chmod +x "$ws/tools/dev/research.sh"
+  cp "$ROOT/tools/dev/shell.sh" "$ws/tools/dev/shell.sh"
   if [[ -f "$ROOT/tools/research-gateway-compose.yml" ]]; then
     cp "$ROOT/tools/research-gateway-compose.yml" "$ws/tools/research-gateway-compose.yml"
   fi
@@ -343,6 +344,12 @@ if [[ "${1:-}" == "compose" ]]; then
   if [[ "$sub" == "restart" ]]; then
     exit 0
   fi
+  if [[ "$sub" == "logs" ]]; then
+    if [[ "$*" == *"-f"* && "${Q_TEST_LOGS_BRIEF:-0}" == "1" ]]; then
+      sleep 0.2
+    fi
+    exit 0
+  fi
   exit 0
 fi
 
@@ -378,6 +385,22 @@ run_dev() {
     export HOME="$ws/home"
     export PATH="$(test_path "$ws")"
     "$ws/dev" "$@"
+  )
+}
+
+run_dev_shell() {
+  local ws="$1"
+  local input="$2"
+  (
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state"
+    export Q_DEV_STATE_DIR="$ws/state/q-dev"
+    export Q_RESEARCH_DATA_DIR="$ws/q_backend/data/research"
+    export Q_RESEARCH_ROOT="$ws"
+    export HOME="$ws/home"
+    export PATH="$(test_path "$ws")"
+    export Q_TEST_LOGS_BRIEF="${Q_TEST_LOGS_BRIEF:-0}"
+    printf '%s\n' "$input" | "$ws/dev" shell
   )
 }
 
@@ -556,6 +579,63 @@ test_status_output() {
   clean_workspace "$ws"
 }
 
+test_shell_transcript() {
+  local ws out status_after
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev_shell "$ws" $'up all
+status
+down live
+status
+down bogus
+status
+exit
+' 2>&1 || true)"
+  assert_contains "shell up all" "Both Live and Research stacks started" "$out"
+  assert_contains "shell status in transcript" "Live stack" "$out"
+  assert_contains "shell down live" "Q live dev stack stopped" "$out"
+  assert_contains "shell reports failed down" "invalid down target" "$out"
+  assert_contains "shell reports exit status" "command exited with status" "$out"
+
+  out="$(run_dev_shell "$ws" $'up all
+exit
+' 2>&1 || true)"
+  status_after="$(run_dev "$ws" status 2>&1 || true)"
+  assert_contains "exit leaves research stack addressable" "Research stack" "$status_after"
+  assert_not_contains "exit without down does not stop all" "All Q dev stacks stopped" "$out"
+
+  clean_workspace "$ws"
+}
+
+test_shell_logs_returns_to_prompt() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_dev "$ws" all >/dev/null 2>&1 || true
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state"
+    export Q_DEV_STATE_DIR="$ws/state/q-dev"
+    export Q_RESEARCH_DATA_DIR="$ws/q_backend/data/research"
+    export Q_RESEARCH_ROOT="$ws"
+    export HOME="$ws/home"
+    export PATH="$(test_path "$ws")"
+    export Q_TEST_LOGS_BRIEF=1
+    printf '%s\n' 'logs postgres' 'status' 'exit' | "$ws/dev" shell 2>&1 || true
+  )"
+  assert_contains "logs returns before second status" "Live stack" "$out"
+  clean_workspace "$ws"
+}
+
+test_shell_idle_eof() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev_shell "$ws" 'status' 2>&1 || true)"
+  assert_contains "eof after command still ran status" "Live stack" "$out"
+  clean_workspace "$ws"
+}
+
 main() {
   echo "Running dev launcher harness..."
   test_default_starts_both_stacks
@@ -568,6 +648,9 @@ main() {
   test_port_conflict
   test_failed_research_preflight_reports_error_and_keeps_live
   test_status_output
+  test_shell_transcript
+  test_shell_logs_returns_to_prompt
+  test_shell_idle_eof
 
   echo
   echo "passed=$PASS failed=$FAIL"
