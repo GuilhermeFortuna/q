@@ -876,17 +876,17 @@ research_logs() {
   local svc="${1:-api}"
   case "$svc" in
     postgres|redis)
-      exec "${RESEARCH_COMPOSE[@]}" logs -f "$svc"
+      dev_follow "${RESEARCH_COMPOSE[@]}" logs -f "$svc"
       ;;
     api|worker|relay|ui)
       if [[ "$(research_mode)" == "container" && "$svc" != "ui" ]]; then
         local target="$svc"
         [[ "$svc" == "api" ]] && target="backend"
-        exec "${RESEARCH_COMPOSE[@]}" logs -f "$target"
+        dev_follow "${RESEARCH_COMPOSE[@]}" logs -f "$target"
       else
         local log="$RESEARCH_LOG_DIR/$svc.log"
         [[ -f "$log" ]] || die "log file not found: $log"
-        exec tail -f "$log"
+        dev_follow tail -f "$log"
       fi
       ;;
     *)

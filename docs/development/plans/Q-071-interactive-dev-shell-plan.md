@@ -12,14 +12,14 @@
 
 ## Implementation
 
-- [ ] **Add the prompt.** Handle `shell` in `dev`; read one line at a time, parse only the spec's commands and mode flags, and dispatch through the existing CLI handler. Start with no side effects. Keep the prompt active after a command error, and show `help` and unknown-command messages.
-- [ ] **Handle interaction boundaries.** Make `exit`, `quit`, EOF and idle Ctrl+C leave services running. Allow Ctrl+C during `logs` to return to the prompt. Ensure desktop UIs started by `up` do not block it.
-- [ ] **Document the shell.** Add short examples to `README.md` and `./dev --help`, including `exit` versus `down` behavior.
+- [x] **Add the prompt.** Handle `shell` in `dev`; read one line at a time, parse only the spec's commands and mode flags, and dispatch through the existing CLI handler. Start with no side effects. Keep the prompt active after a command error, and show `help` and unknown-command messages.
+- [x] **Handle interaction boundaries.** Make `exit`, `quit`, EOF and idle Ctrl+C leave services running. Allow Ctrl+C during `logs` to return to the prompt. Ensure desktop UIs started by `up` do not block it.
+- [x] **Document the shell.** Add short examples to `README.md` and `./dev --help`, including `exit` versus `down` behavior.
 
 ## Minimal verification
 
-- [ ] Add one mocked stdin transcript to the workspace launcher harness covering `up`, `status`, `down`, error recovery and exit without teardown. Add a focused Ctrl+C log-follow check if the transcript cannot express it.
-- [ ] Run the mocked shell check and `bash -n dev`; do not run real GPU, Wine, Docker or desktop checks for this prompt layer.
+- [x] Add one mocked stdin transcript to the workspace launcher harness covering `up`, `status`, `down`, error recovery and exit without teardown. Add a focused Ctrl+C log-follow check if the transcript cannot express it.
+- [x] Run the mocked shell check and `bash -n dev`; do not run real GPU, Wine, Docker or desktop checks for this prompt layer.
 
 ## Handoff
 

@@ -202,6 +202,20 @@ From the workspace root, with Docker running, start the development environment:
 ./dev down             # stop all Q dev stacks (default: all)
 ./dev down live        # stop live execution stack (keeps shared gateway if research is running)
 ./dev down research    # stop research stack
+./dev shell            # interactive dev> prompt over the same commands
+```
+
+`./dev shell` opens a `dev>` prompt without starting any stack. Use `up live`, `up research`,
+`up all`, `down`, `status`, `logs`, and `restart` as you would on the CLI; `exit` or `quit`
+only leaves the prompt—running stacks keep going until you run `down` (from the shell or via
+`./dev down`).
+
+```bash
+./dev shell
+dev> up all
+dev> status
+dev> down research
+dev> exit              # does not stop remaining stacks
 ```
 
 `./dev` provides unified lifecycle management across both stacks:
