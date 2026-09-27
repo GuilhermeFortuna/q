@@ -84,3 +84,6 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
   statuses any other way (no `gh project item-edit`, no web UI).
 - Commit on the task branch with focused commits that follow the repository's conventions.
 - Use the `gh` CLI for GitHub operations.
+- Keep task specs and plans lean. Include only checks needed to verify the changed
+  behavior; prefer focused mocks for launcher work. Do not require full CI,
+  GPU, Wine, Docker, or desktop runs without a concrete task-specific need.
