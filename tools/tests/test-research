@@ -67,6 +67,11 @@ setup_workspace() {
     "$ws/tools" \
     "$ws/state"
 
+  mkdir -p "$ws/tools/dev"
+  cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
+  chmod +x "$ws/tools/dev/research.sh"
+  cp "$ROOT/dev" "$ws/dev"
+  chmod +x "$ws/dev"
   cp "$RESEARCH_SRC" "$ws/research"
   chmod +x "$ws/research"
   if [[ -f "$ROOT/tools/research-gateway-compose.yml" ]]; then
@@ -354,7 +359,7 @@ EOF
   local cmd
   for cmd in bash sha256sum find awk timeout sed cat cp mkdir chmod grep sort \
     mktemp sleep kill printf true false tr cut head tail date uname env basename dirname \
-    setsid rm ln tee; do
+    readlink setsid rm ln tee; do
     if command -v "$cmd" >/dev/null 2>&1; then
       ln -sfn "$(command -v "$cmd")" "$ws/sysbin/$cmd"
     fi
@@ -769,7 +774,8 @@ test_teardown_stops_the_relay() {
   local ws out
   ws="$(mktemp -d)"
   setup_workspace "$ws"
-  out="$(run_research "$ws" 2>&1 || true)"
+  run_research "$ws" >/dev/null 2>&1 || true
+  out="$("$ws/dev" down research 2>&1 || true)"
   assert_contains "teardown reports stopping the relay" "stopped relay" "$out"
   rm -rf "$ws"
 }
