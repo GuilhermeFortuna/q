@@ -108,3 +108,17 @@ def test_merge_conflict_is_aborted(workspace):
         Git(path).merge_no_ff(BRANCH, "merge")
     assert not (path / ".git/MERGE_HEAD").exists()
     assert git(path, "status", "--porcelain") == ""
+
+
+def test_workspace_repo_resolves_to_workspace_root(workspace):
+    write(workspace / "AGENTS.md", "# Root\n")
+    write(workspace / "docs/development/specs/Q-070-unified-development-launcher-spec.md", "# spec\n")
+    write(workspace / "docs/development/plans/Q-070-unified-development-launcher-plan.md", "# plan\n")
+    task = Board(FakeRunner([item("Q-070", "Unified development launcher", "Todo", repo="q")])).task("Q-070")
+    files = task_files(workspace, task)
+    assert files.repo == workspace
+    assert files.spec == workspace / "docs/development/specs/Q-070-unified-development-launcher-spec.md"
+    assert files.plan == workspace / "docs/development/plans/Q-070-unified-development-launcher-plan.md"
+    assert workspace / "AGENTS.md" in files.instructions
+    assert worktree_path(workspace, task) == workspace / ".worktrees/q/Q-070-unified-development-launcher"
+

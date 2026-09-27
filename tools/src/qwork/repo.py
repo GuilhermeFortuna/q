@@ -29,8 +29,13 @@ def _single(directory: Path, pattern: str, kind: str, task_id: str) -> Path:
     return matches[0]
 
 
+def repo_path(workspace: Path, repo_name: str) -> Path:
+    """Resolve a repository directory under the workspace, or the workspace itself for 'q'."""
+    return workspace if repo_name == "q" else workspace / repo_name
+
+
 def task_files(workspace: Path, task: Task) -> TaskFiles:
-    repo = workspace / task.repo
+    repo = repo_path(workspace, task.repo)
     if not repo.is_dir():
         raise QworkError(f"{task.id}: repository {task.repo} is not cloned at {repo}")
     docs = repo / "docs" / "development"
