@@ -3,6 +3,15 @@
 You are in `q/`, the workspace root of the Q quantitative trading platform. `q/` is a
 small meta-repo; the product code lives in independent git repositories inside it.
 
+## Public repository quality
+
+Treat every Q repository as public, production-quality work that prospective employers may
+review. Use conventional, maintainable solutions with clear ownership and complete, accurate
+documentation. Keep specs, plans, code, CI, and GitHub issues consistent and reviewable;
+remove temporary scaffolding and avoid machine-specific shortcuts or unconventional
+workarounds. When a required tool or credential is unavailable, report the blocker and
+resume through the documented workflow once it is restored.
+
 ## Repositories
 
 | Path | Role |
@@ -22,17 +31,17 @@ small meta-repo; the product code lives in independent git repositories inside i
   `--cgroup-parent`. Remote CI is unaffected (slices are absent on hosted runners).
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
-- `./dev` is the canonical local development launcher for `q_terminal` and the
-  execution stack. Docker Compose (`q-dev` project) provides Postgres and Redis;
-  systemd user units supervise the API, outbox relay, market-data publisher, MT5
-  terminal and gateway (Wine), and, for `./dev up execution|full`, the MT5 edge and
-  execution worker. `q_terminal` launches in the
-  foreground and is not supervised. Ctrl+C on `q_terminal` does not tear down
-  infrastructure; use `./dev down` to stop Q-owned Docker containers and systemd
-  units. Prefer `./dev up terminal` over manual compose/systemctl steps.
-- `./research` starts the Research/Backtests stack and tears it down on Ctrl+C.
-  Prefer it over manual compose/UI steps when iterating on backtests. It
-  fail-closes if CUDA is unavailable.
+- `./dev` is the canonical local development launcher for the Q platform. It supports:
+  - `./dev` or `./dev all`: starts both Live and Research stacks and opens both desktop UIs.
+  - `./dev live`: starts the full live execution profile and launches `q_terminal`.
+  - `./dev research [opts]`: starts Research backend and launches Tauri research desktop UI (`--host` default, `--container`, `--rebuild`).
+  - `./dev down [live|research|all]`: selectively stops stacks (default `all`). Stopping live retains the shared MT5 gateway if Research is running and using it.
+  - `./dev status`: concise overview of both stacks, APIs, workers, and desktop UIs.
+  - `./dev logs <service>`: follows logs by alias (unqualified for live, `research:<svc>` for research).
+  - `./dev restart <service>`: restarts a service by alias.
+  - `./dev up [terminal|execution|full]`: legacy profile start.
+  - Persistent lifecycle: launcher commands return after launching desktop UIs; closing a UI window or pressing Ctrl+C does not stop backend services. Services stay running until explicitly stopped via `./dev down [live|research|all]`.
+- `./research` is a backward-compatible shim forwarding directly to `./dev research "$@"`.
   - Default (`--host`): containerized Postgres and Redis only; the API and
     Dramatiq worker run from `q_backend/.venv`, and torch uses the host GPU
     directly. Nothing is built, exported, or downloaded — the NVIDIA Container

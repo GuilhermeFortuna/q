@@ -1,0 +1,579 @@
+#!/usr/bin/env bash
+# Mocked command harness for unified ./dev launcher.
+# Exercises: default/all/live/research dispatch, selective stop, repeated start,
+# port conflicts, failed Research preflight, and gateway retention.
+# Uses fake docker/systemctl/curl/make/etc.; no real GPU, Docker, or Wine needed.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PASS=0
+FAIL=0
+
+die() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_eq() {
+  local label="$1" expected="$2" actual="$3"
+  if [[ "$expected" != "$actual" ]]; then
+    echo "FAIL: $label (expected='$expected' actual='$actual')" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+assert_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "FAIL: $label (missing '$needle' in: $haystack)" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+assert_not_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "FAIL: $label (unexpected '$needle' in: $haystack)" >&2
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+  PASS=$((PASS + 1))
+  echo "ok: $label"
+}
+
+setup_workspace() {
+  local ws="$1"
+  mkdir -p \
+    "$ws/bin" \
+    "$ws/sysbin" \
+    "$ws/home/.config/systemd/user" \
+    "$ws/home/.config/mt5-gateway" \
+    "$ws/home/.config/mt5-edge" \
+    "$ws/home/.config/q" \
+    "$ws/q_backend/deploy/systemd/dev" \
+    "$ws/q_backend/gateway/systemd" \
+    "$ws/q_backend/docker/metatrader5-stub/MetaTrader5" \
+    "$ws/q_backend/src" \
+    "$ws/q_backend/data" \
+    "$ws/q_frontend/node_modules" \
+    "$ws/q_terminal" \
+    "$ws/tools/dev" \
+    "$ws/state/units" \
+    "$ws/state/ports"
+
+  cp "$ROOT/dev" "$ws/dev"
+  chmod +x "$ws/dev"
+  cp "$ROOT/research" "$ws/research"
+  chmod +x "$ws/research"
+  cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
+  chmod +x "$ws/tools/dev/research.sh"
+  if [[ -f "$ROOT/tools/research-gateway-compose.yml" ]]; then
+    cp "$ROOT/tools/research-gateway-compose.yml" "$ws/tools/research-gateway-compose.yml"
+  fi
+
+  # System tools
+  local cmd
+  for cmd in bash sha256sum find awk timeout sed cat cp mkdir chmod grep sort \
+    mktemp sleep kill printf true false tr cut head tail date uname env basename dirname \
+    readlink setsid rm ln tee mv cksum touch cmp python3; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      ln -sfn "$(command -v "$cmd")" "$ws/sysbin/$cmd"
+    fi
+  done
+
+  # Minimal backend and terminal files
+  cat >"$ws/q_backend/Dockerfile" <<'EOF'
+FROM scratch
+EOF
+  cat >"$ws/q_backend/pyproject.toml" <<'EOF'
+[project]
+name = "q-backend"
+version = "0.0.0"
+EOF
+  cat >"$ws/q_backend/uv.lock" <<'EOF'
+version = 1
+EOF
+  cat >"$ws/q_backend/docker/entrypoint.sh" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+  cat >"$ws/q_backend/docker/metatrader5-stub/pyproject.toml" <<'EOF'
+[project]
+name = "metatrader5"
+version = "0.0.0"
+EOF
+  cat >"$ws/q_backend/docker/metatrader5-stub/MetaTrader5/__init__.py" <<'EOF'
+# stub
+EOF
+  cat >"$ws/q_backend/src/app.py" <<'EOF'
+# app
+EOF
+  cat >"$ws/q_backend/docker-compose.yml" <<'EOF'
+services:
+  postgres:
+    image: postgres:16-alpine
+  redis:
+    image: redis:7-alpine
+  backend:
+    profiles: ["containerized"]
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+  worker:
+    profiles: ["containerized"]
+    image: ${Q_BACKEND_IMAGE:-q-backend:dev}
+EOF
+  cat >"$ws/q_backend/deploy/systemd/backend.env.example" <<'EOF'
+Q_DATABASE_URL=example
+EOF
+  cat >"$ws/q_backend/gateway/systemd/mt5-gateway.env.example" <<'EOF'
+MT5_GATEWAY_TOKEN=test-token
+EOF
+  cat >"$ws/q_backend/gateway/systemd/mt5-edge.env.example" <<'EOF'
+MT5_EDGE_TOKEN=test-token
+EOF
+  touch "$ws/q_backend/gateway/systemd/mt5-terminal.service"
+  touch "$ws/q_backend/gateway/systemd/mt5-gateway.service"
+  touch "$ws/q_backend/gateway/systemd/mt5-edge.service"
+  touch "$ws/q_backend/deploy/systemd/dev/q-api.service.in"
+  touch "$ws/q_backend/deploy/systemd/dev/q-outbox-relay.service.in"
+  touch "$ws/q_backend/deploy/systemd/dev/q-market-publisher.service.in"
+  touch "$ws/q_backend/deploy/systemd/dev/q-execution-worker.service.in"
+
+  cat >"$ws/q_frontend/.env.example" <<'EOF'
+VITE_API_BASE_URL=http://127.0.0.1:8001
+VITE_ENABLE_MSW=false
+EOF
+
+  cat >"$ws/q_terminal/Makefile" <<'EOF'
+run:
+	@echo "q_terminal mock running"
+	@sleep 60
+EOF
+
+  # Mocks for PATH
+  cat >"$ws/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "curl $*" >>"${Q_TEST_STATE}/curl.log"
+url="$*"
+if [[ "$url" == *"/execution/health"* ]]; then
+  echo '{"worker_status":"healthy","edge":{"reachable":true,"mt5_connected":true}}'
+  exit 0
+fi
+if [[ "$url" == *"/v1/health"* ]]; then
+  echo '{"status":"ok","mt5_connected":true}'
+  exit 0
+fi
+if [[ "$url" == *"/system/health"* ]]; then
+  echo '{"status":"ok"}'
+  exit 0
+fi
+exit 0
+EOF
+
+  cat >"$ws/bin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+echo "pnpm $*" >>"${Q_TEST_STATE}/pnpm.log"
+if [[ "$*" == *"install"* ]]; then
+  exit 0
+fi
+sleep 60
+EOF
+
+  cat >"$ws/bin/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${Q_FAKE_NVIDIA_SMI_FAIL:-0}" == "1" ]]; then
+  echo "nvidia-smi failed" >&2
+  exit 1
+fi
+echo "NVIDIA GeForce RTX 2060"
+exit 0
+EOF
+
+  cat >"$ws/bin/nvidia-ctk" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${Q_FAKE_NVIDIA_CTK_FAIL:-0}" == "1" ]]; then
+  echo "nvidia-ctk missing" >&2
+  exit 1
+fi
+echo "nvidia-ctk ok"
+exit 0
+EOF
+
+  cat >"$ws/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+echo "uv $*" >>"${Q_TEST_STATE}/uv.log"
+exit 0
+EOF
+
+  cat >"$ws/bin/make" <<'EOF'
+#!/usr/bin/env bash
+echo "make $*" >>"${Q_TEST_STATE}/make.log"
+sleep 60
+EOF
+
+  cat >"$ws/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+STATE="${Q_TEST_STATE:?}"
+echo "systemctl $*" >>"$STATE/systemctl.log"
+cmd="$1"
+if [[ "$cmd" == "--user" ]]; then
+  shift
+  cmd="$1"
+fi
+case "$cmd" in
+  status) exit 0 ;;
+  cat) exit 0 ;;
+  is-active)
+    unit="${@: -1}"
+    if [[ -f "$STATE/units/$unit" ]]; then exit 0; else exit 1; fi
+    ;;
+  show)
+    unit="${@: -1}"
+    if [[ -f "$STATE/units/$unit" ]]; then echo "active/running"; else echo "inactive/dead"; fi
+    ;;
+  start)
+    shift
+    for u in "$@"; do
+      mkdir -p "$STATE/units"
+      touch "$STATE/units/$u"
+    done
+    exit 0
+    ;;
+  stop)
+    shift
+    for u in "$@"; do
+      rm -f "$STATE/units/$u"
+    done
+    exit 0
+    ;;
+  restart)
+    shift
+    for u in "$@"; do
+      mkdir -p "$STATE/units"
+      touch "$STATE/units/$u"
+    done
+    exit 0
+    ;;
+  daemon-reload) exit 0 ;;
+esac
+exit 0
+EOF
+
+  # Host-mode virtualenv
+  mkdir -p "$ws/q_backend/.venv/bin"
+  cat >"$ws/q_backend/.venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+echo "venv-python $*" >>"${Q_TEST_STATE}/host.log"
+if [[ "${Q_FAKE_CUDA_PROBE_FAIL:-0}" == "1" ]]; then
+  echo "torch.cuda.is_available() is False" >&2
+  exit 1
+fi
+echo "NVIDIA GeForce RTX 2060"
+exit 0
+EOF
+  cat >"$ws/q_backend/.venv/bin/alembic" <<'EOF'
+#!/usr/bin/env bash
+echo "alembic $*" >>"${Q_TEST_STATE}/host.log"
+exit 0
+EOF
+  cat >"$ws/q_backend/.venv/bin/uvicorn" <<'EOF'
+#!/usr/bin/env bash
+echo "uvicorn $*" >>"${Q_TEST_STATE}/host.log"
+sleep 60
+EOF
+  cat >"$ws/q_backend/.venv/bin/worker" <<'EOF'
+#!/usr/bin/env bash
+echo "worker $*" >>"${Q_TEST_STATE}/host.log"
+sleep 60
+EOF
+  cat >"$ws/q_backend/.venv/bin/q-outbox-relay" <<'EOF'
+#!/usr/bin/env bash
+echo "q-outbox-relay $*" >>"${Q_TEST_STATE}/host.log"
+sleep 60
+EOF
+  chmod +x "$ws/q_backend/.venv/bin"/*
+
+  # Fake Docker
+  cat >"$ws/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="${Q_TEST_STATE:?}"
+echo "docker $*" >>"$STATE/docker.log"
+
+if [[ "${1:-}" == "info" ]]; then exit 0; fi
+
+if [[ "${1:-}" == "compose" ]]; then
+  sub=""
+  for arg in "$@"; do
+    case "$arg" in
+      up|down|config|ps|logs|version|restart|exec) sub="$arg"; break ;;
+    esac
+  done
+  if [[ "$sub" == "version" ]]; then
+    echo "Docker Compose version 2.0.0"
+    exit 0
+  fi
+  if [[ "$sub" == "exec" ]]; then
+    if [[ "$*" == *"ping"* ]]; then
+      echo "PONG"
+    fi
+    exit 0
+  fi
+  if [[ "$sub" == "up" ]]; then
+    echo "up" >"$STATE/compose_state"
+    exit 0
+  fi
+  if [[ "$sub" == "down" ]]; then
+    echo "down" >"$STATE/compose_state"
+    exit 0
+  fi
+  if [[ "$sub" == "ps" ]]; then
+    if [[ -f "$STATE/compose_state" ]] && grep -q "up" "$STATE/compose_state"; then
+      echo "postgres"
+      echo "redis"
+    fi
+    exit 0
+  fi
+  if [[ "$sub" == "restart" ]]; then
+    exit 0
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "build" ]]; then exit 0; fi
+if [[ "${1:-}" == "run" ]]; then
+  if [[ "${Q_FAKE_CUDA_PROBE_FAIL:-0}" == "1" ]]; then
+    echo "CUDA probe failed" >&2
+    exit 1
+  fi
+  echo "True NVIDIA GeForce RTX 2060"
+  exit 0
+fi
+exit 0
+EOF
+
+  chmod +x "$ws/bin"/*
+}
+
+test_path() {
+  local ws="$1"
+  echo "$ws/bin:$ws/sysbin"
+}
+
+run_dev() {
+  local ws="$1"
+  shift
+  (
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state"
+    export Q_DEV_STATE_DIR="$ws/state/q-dev"
+    export Q_RESEARCH_DATA_DIR="$ws/q_backend/data/research"
+    export Q_RESEARCH_ROOT="$ws"
+    export HOME="$ws/home"
+    export PATH="$(test_path "$ws")"
+    "$ws/dev" "$@"
+  )
+}
+
+clean_workspace() {
+  local ws="$1"
+  run_dev "$ws" down all >/dev/null 2>&1 || true
+  rm -rf "$ws" 2>/dev/null || rm -rf "$ws" 2>/dev/null || true
+}
+
+test_default_starts_both_stacks() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev "$ws" 2>&1 || true)"
+  assert_contains "default starts both stacks" "Both Live and Research stacks started" "$out"
+  assert_contains "default launches q_terminal" "q_terminal started" "$out"
+  assert_contains "default launches Research UI" "launching Research UI" "$out"
+  clean_workspace "$ws"
+}
+
+test_all_starts_both_stacks() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev "$ws" all 2>&1 || true)"
+  assert_contains "all command starts both stacks" "Both Live and Research stacks started" "$out"
+  clean_workspace "$ws"
+}
+
+test_live_dispatch_and_terminal() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev "$ws" live 2>&1 || true)"
+  assert_contains "live starts execution stack" "Execution stack is up" "$out"
+  assert_contains "live launches q_terminal" "q_terminal started" "$out"
+  assert_not_contains "live does not start research" "launching Research UI" "$out"
+  clean_workspace "$ws"
+}
+
+test_research_dispatch_and_rebuild() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  # Default research is host mode
+  out="$(run_dev "$ws" research 2>&1 || true)"
+  assert_contains "research starts research UI" "launching Research UI" "$out"
+  assert_contains "research default mode is host" "mode:  host" "$out"
+
+  # --rebuild without container mode fails
+  out="$(run_dev "$ws" research --rebuild 2>&1 || true)"
+  assert_contains "rebuild requires container mode" "--rebuild requires container mode" "$out"
+
+  # Stop research before starting in container mode
+  run_dev "$ws" down research >/dev/null 2>&1 || true
+
+  # --container selects container mode
+  out="$(run_dev "$ws" research --container 2>&1 || true)"
+  assert_contains "container mode is selected" "mode:  container" "$out"
+
+  clean_workspace "$ws"
+}
+
+test_repeated_start_is_idempotent() {
+  local ws out1 out2
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out1="$(run_dev "$ws" all 2>&1 || true)"
+  out2="$(run_dev "$ws" all 2>&1 || true)"
+  assert_contains "repeated start detects q_terminal running" "q_terminal: already running" "$out2"
+  assert_contains "repeated start detects Research UI running" "Research UI: already running" "$out2"
+  clean_workspace "$ws"
+}
+
+test_selective_down() {
+  local ws out_live out_res out_all
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # Start all first
+  run_dev "$ws" all >/dev/null 2>&1 || true
+
+  # Stop only live
+  out_live="$(run_dev "$ws" down live 2>&1 || true)"
+  assert_contains "down live stops live stack" "Q live dev stack stopped" "$out_live"
+  assert_not_contains "down live does not stop research" "Research stack stopped" "$out_live"
+
+  # Stop research
+  out_res="$(run_dev "$ws" down research 2>&1 || true)"
+  assert_contains "down research stops research stack" "Research stack stopped" "$out_res"
+
+  # Restart all, then down all
+  run_dev "$ws" all >/dev/null 2>&1 || true
+  out_all="$(run_dev "$ws" down 2>&1 || true)"
+  assert_contains "bare down stops all stacks" "All Q dev stacks stopped" "$out_all"
+
+  clean_workspace "$ws"
+}
+
+test_shared_gateway_retention() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # Start both stacks
+  run_dev "$ws" all >/dev/null 2>&1 || true
+
+  # With research running and using local gateway, down live should retain gateway
+  out="$(run_dev "$ws" down live 2>&1 || true)"
+  assert_contains "down live retains shared gateway" "Keeping shared MT5 terminal and gateway running" "$out"
+
+  # down research never stops MT5 gateway
+  run_dev "$ws" all >/dev/null 2>&1 || true
+  out="$(run_dev "$ws" down research 2>&1 || true)"
+  assert_not_contains "down research does not stop shared gateway" "mt5-gateway.service" "$out"
+
+  # down all stops shared gateway
+  out="$(run_dev "$ws" down all 2>&1 || true)"
+  assert_not_contains "down all does not retain gateway" "Keeping shared MT5 terminal" "$out"
+  assert_contains "down all stops all" "All Q dev stacks stopped" "$out"
+
+  clean_workspace "$ws"
+}
+
+test_port_conflict() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # Fake port 5434 in use
+  mkdir -p "$ws/state/ports"
+  touch "$ws/state/ports/5434"
+
+  out="$(run_dev "$ws" live 2>&1 || true)"
+  assert_contains "port conflict is reported" "port 5434 is in use" "$out"
+
+  clean_workspace "$ws"
+}
+
+test_failed_research_preflight_reports_error_and_keeps_live() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # Make research CUDA fail
+  out="$(
+    cd "$ws"
+    export Q_TEST_STATE="$ws/state"
+    export Q_DEV_STATE_DIR="$ws/state/q-dev"
+    export Q_RESEARCH_DATA_DIR="$ws/q_backend/data/research"
+    export Q_RESEARCH_ROOT="$ws"
+    export HOME="$ws/home"
+    export PATH="$(test_path "$ws")"
+    export Q_FAKE_CUDA_PROBE_FAIL=1
+    "$ws/dev" all 2>&1 || true
+  )"
+
+  assert_contains "failed preflight is reported" "CUDA probe failed for the host venv" "$out"
+  assert_contains "start failed message" "Start failed" "$out"
+  # Live stack was started before research failed
+  assert_contains "live stack was started" "Execution stack is up" "$out"
+
+  clean_workspace "$ws"
+}
+
+test_status_output() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  out="$(run_dev "$ws" status 2>&1 || true)"
+  assert_contains "status shows live stack header" "Live stack" "$out"
+  assert_contains "status shows shared MT5 header" "Shared MT5" "$out"
+  assert_contains "status shows research stack header" "Research stack" "$out"
+  assert_contains "status shows research:api" "research:api" "$out"
+  assert_contains "status shows live api" "api" "$out"
+  clean_workspace "$ws"
+}
+
+main() {
+  echo "Running dev launcher harness..."
+  test_default_starts_both_stacks
+  test_all_starts_both_stacks
+  test_live_dispatch_and_terminal
+  test_research_dispatch_and_rebuild
+  test_repeated_start_is_idempotent
+  test_selective_down
+  test_shared_gateway_retention
+  test_port_conflict
+  test_failed_research_preflight_reports_error_and_keeps_live
+  test_status_output
+
+  echo
+  echo "passed=$PASS failed=$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

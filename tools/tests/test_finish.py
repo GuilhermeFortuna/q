@@ -186,3 +186,29 @@ def test_dirty_secondary_repository_is_refused(make_ctx):
 
     assert "q_contracts has uncommitted changes" in ctx.err.getvalue()
     assert fake.status_edits() == []
+
+
+def test_finish_workspace_repo_task(make_ctx):
+    ctx, fake = make_ctx([item("Q-070", "Unified development launcher", "In Review", repo="q")])
+    ws = ctx.workspace
+    origin = ws.parent / "q-origin.git"
+    git(ws.parent, "init", "--quiet", "--bare", str(origin))
+    git(ws, "init", "--quiet")
+    git(ws, "remote", "add", "origin", str(origin))
+    write(ws / "README.md", "# Q\n")
+    git(ws, "add", "README.md")
+    git(ws, "commit", "--quiet", "-m", "init")
+    git(ws, "branch", "-M", "development")
+    git(ws, "push", "--quiet", "-u", "origin", "development")
+
+    branch = "Q-070-unified-development-launcher"
+    git(ws, "checkout", "--quiet", "-b", branch)
+    write(ws / "feature.txt", "feature\n")
+    git(ws, "add", "feature.txt")
+    git(ws, "commit", "--quiet", "-m", "feature")
+
+    assert main(["finish", "Q-070"], ctx) == 0
+    assert git(ws, "branch", "--show-current").strip() == "development"
+    assert len(git(ws, "rev-list", "--parents", "-n1", "HEAD").split()) == 3
+    assert fake.status_edits() == [("PVTI_Q-070", "Done")]
+

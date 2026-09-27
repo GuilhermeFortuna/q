@@ -187,53 +187,47 @@ git clone https://github.com/GuilhermeFortuna/q_backend.git
 git clone https://github.com/GuilhermeFortuna/q_frontend.git
 ```
 
-### Terminal / Execution development (one command)
+### Local development (one command)
 
-From the workspace root, with Docker running, bring up the backend stack and
-launch `q_terminal`:
+From the workspace root, with Docker running, start the development environment:
 
 ```bash
-./dev up terminal      # Postgres, Redis, API, outbox relay, MT5 terminal/gateway,
-                       # market-data publisher + q_terminal
-./dev up execution     # above minus q_terminal, plus MT5 edge + execution worker
-./dev up full          # execution profile + q_terminal
-./dev status           # concise stack overview
-./dev logs publisher   # follow logs (aliases: api, outbox, postgres, mt5, …)
-./dev restart api
-./dev down             # stop Q-owned Docker containers and systemd units
+./dev                  # start both Live and Research stacks and launch both UIs (default)
+./dev live             # full live execution profile + q_terminal
+./dev research         # Research backend + UI (--host default | --container)
+./dev status           # concise stack overview across both stacks
+./dev logs api         # follow service logs (aliases: api, outbox, publisher, mt5, ...)
+./dev logs research:api # follow research service logs (research:api, research:worker, ...)
+./dev restart api      # restart a service by alias
+./dev down             # stop all Q dev stacks (default: all)
+./dev down live        # stop live execution stack (keeps shared gateway if research is running)
+./dev down research    # stop research stack
 ```
 
-`./dev` starts Postgres and Redis via Docker Compose (`q-dev` project) and
-supervises the API, outbox relay, market-data publisher, execution worker and
-MT5 (Wine) services as systemd user units against those Docker endpoints. Live
-quotes and bars need Wine and a logged-in MT5 terminal (see
-`q_backend/gateway/setup_wine.sh`); without them the terminal shows history only
-and the publisher waits for the gateway. `q_terminal` defaults to `PETR4`/`M1`;
-override with `Q_TERMINAL_SYMBOL`/`Q_TERMINAL_TIMEFRAME` (values must be in
-`Q_STREAM_SYMBOLS`/`Q_STREAM_BAR_TIMEFRAMES` in `~/.config/q/backend.env`). **Ctrl+C** on `q_terminal` stops only the
-terminal; backends keep running until `./dev down`.
+`./dev` provides unified lifecycle management across both stacks:
+- **Persistent lifecycle**: launcher commands return after launching desktop UIs. Closing a UI window or pressing Ctrl+C does not stop backend services. Backends stay running until explicitly stopped via `./dev down [live|research|all]`.
+- **Live stack**: Docker Compose (`q-dev` project) provides Postgres (`5434`) and Redis (`6380`); systemd user units supervise the API (`8000`), outbox relay, market-data publisher, execution worker, and MT5 (Wine) services. `q_terminal` defaults to `PETR4`/`M1` (override with `Q_TERMINAL_SYMBOL`/`Q_TERMINAL_TIMEFRAME`).
+- **Research stack**: Docker Compose (`q-research` project) provides isolated Postgres (`5435`) and Redis (`6381`); backend API (`8001`), Dramatiq worker, and relay run with GPU acceleration, pointing the Research UI at port 8001.
+- **Compatibility**: `./research` is a backward-compatible shim that forwards directly to `./dev research "$@"`. Legacy `./dev up [terminal|execution|full]` profile invocations remain supported.
 
-Use `./research` when iterating on the Research UI and backtests. It can run
-alongside `./dev`; Ctrl+C tears down only the research stack. Research requires CUDA.
-
-### Research / Backtests (one command)
+### Research / Backtests
 
 From the workspace root, with Docker running and an NVIDIA GPU available:
 
 ```bash
-./research                          # host mode (default)
-./research --container              # containerized API + worker
-./research --container --rebuild    # force one image rebuild
+./dev research                       # host mode (default)
+./dev research --container           # containerized API + worker
+./dev research --container --rebuild # force one image rebuild
+# Or using the compatibility shim:
+./research [opts]
 ```
 
 Both modes fail-closed CUDA-probe before anything starts, point the Research UI at its
 API (`http://127.0.0.1:8001`, `VITE_ENABLE_MSW=false`), and launch `pnpm tauri:dev`.
 Research uses its own `q-research` Compose project, Postgres on port `5435`, Redis on
-`6381`, and writable data in `q_backend/data/research/`. The `./dev` stack keeps
-`q-dev`, ports `5434`/`6380`/`8000`, and `q_backend/data/`. **Ctrl+C** stops the
-Research UI and backend, and tears down only `q-research` containers without
-deleting volumes, images, build cache, or host environments. Use `./dev down`
-separately to stop the execution stack.
+`6381`, and writable data in `q_backend/data/research/`. The Live stack keeps
+`q-dev`, ports `5434`/`6380`/`8000`, and `q_backend/data/`. Backends and containers
+are preserved until explicitly stopped with `./dev down [research|all]`.
 
 #### Host mode (default)
 

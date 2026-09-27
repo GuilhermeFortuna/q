@@ -14,7 +14,7 @@ from qwork.board import DONE, IN_REVIEW
 from qwork.context import Context
 from qwork.errors import QworkError
 from qwork.release import is_release_repo, release
-from qwork.repo import Git, workspace_repos, worktree_path
+from qwork.repo import Git, repo_path, workspace_repos, worktree_path
 
 # Producers merge first so consumers never land ahead of what they pin.
 MERGE_ORDER = ("q_contracts", "q_core")
@@ -29,17 +29,21 @@ class Target:
 
 
 def _targets(ctx: Context, task) -> list[Target]:
-    primary = ctx.workspace / task.repo
+    primary = repo_path(ctx.workspace, task.repo)
     if not primary.is_dir():
         raise QworkError(f"{task.id}: repository {task.repo} is not cloned at {primary}")
     if not Git(primary, ctx.run).branch_exists(task.branch):
         raise QworkError(f"branch {task.branch} does not exist in {task.repo}")
 
     targets = []
+    seen: set[Path] = set()
     for path in workspace_repos(ctx.workspace):
         git = Git(path, ctx.run)
         if path == primary or git.branch_exists(task.branch):
             targets.append(Target(path.name, path, git, worktree_path(ctx.workspace, task, path.name)))
+            seen.add(path)
+    if primary not in seen:
+        targets.append(Target(task.repo, primary, Git(primary, ctx.run), worktree_path(ctx.workspace, task, task.repo)))
     rank = {name: i for i, name in enumerate(MERGE_ORDER)}
     return sorted(targets, key=lambda t: (rank.get(t.name, len(rank)), t.name))
 
