@@ -2,16 +2,17 @@
 # Workspace development launcher for the Q platform.
 #
 # Docker Compose provides Postgres/Redis; systemd user units supervise Q backend
-# and MT5 services. q_terminal runs in the foreground and is not supervised.
+# and MT5 services. q_terminal and Research UI run in background sessions.
 #
 # Usage (from workspace root or any directory):
-#   ./dev up terminal       # backend + live market data + q_terminal (foreground)
-#   ./dev up execution      # backend + live market data + MT5 edge + execution worker
-#   ./dev up full           # everything above + q_terminal (foreground)
-#   ./dev down              # stop Q-owned Docker containers and systemd units
-#   ./dev status            # concise stack overview
-#   ./dev logs [service]    # follow logs with aliases
-#   ./dev restart <service> # restart a service by alias
+#   ./dev [live|research|all]   # default: all
+#   ./dev live                  # full live execution profile + q_terminal
+#   ./dev research [opts]       # research backend + UI (--host default | --container)
+#   ./dev down [target]         # stop: live | research | all (default: all)
+#   ./dev status                # concise stack overview of both stacks
+#   ./dev logs <service>        # follow logs with aliases (e.g. api, research:api)
+#   ./dev restart <service>     # restart service by alias
+#   ./dev up terminal|full|exec # legacy profile start
 #   ./dev --help
 
 set -euo pipefail
@@ -19,6 +20,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 BACKEND_DIR="$ROOT/q_backend"
 TERMINAL_DIR="$ROOT/q_terminal"
+
+# Live stack settings
 COMPOSE_PROJECT="${Q_DEV_COMPOSE_PROJECT:-q-dev}"
 COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT")
 
@@ -38,8 +41,10 @@ WAIT_ATTEMPTS="${Q_DEV_WAIT_ATTEMPTS:-90}"
 WAIT_INTERVAL="${Q_DEV_WAIT_INTERVAL:-0.5}"
 STATE_DIR="${Q_DEV_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/q-dev}"
 
-# Set by ensure_backend_env_file when backend.env content changes; running
-# backend units are then restarted instead of skipped.
+# Load Research helpers
+# shellcheck source=tools/dev/research.sh
+source "$ROOT/tools/dev/research.sh"
+
 BACKEND_ENV_CHANGED=0
 
 die() {
@@ -53,37 +58,37 @@ need() {
 
 usage() {
   cat <<'EOF'
-Usage: ./dev <command> [args]
+Usage: ./dev [command] [args]
 
 Commands:
-  up terminal     Start backend (Postgres, Redis, API, outbox relay), live market data
-                  (MT5 terminal, gateway, market-data publisher) and launch q_terminal
-  up execution    Start backend + live market data + MT5 edge + execution worker
-  up full         Start the execution profile and launch q_terminal
-  down            Stop Q-owned Docker containers and systemd user units
-  status          Show concise Q stack overview
-  logs [service]  Follow logs (aliases: api, outbox, publisher, postgres, redis, execution, mt5, …)
-  restart <svc>   Restart a service by alias
+  ./dev, ./dev all        Start both stacks and both desktop UIs (default)
+  ./dev live              Start the full live execution profile and Qt terminal
+  ./dev research [opts]   Start Research backend and UI (--host default | --container)
+                          [--rebuild requires container mode]
+  ./dev down [target]     Stop stacks: live | research | all (default: all)
+  ./dev status            Show concise overview of both stacks, APIs, workers, UIs
+  ./dev logs <service>    Follow service logs (e.g. api, outbox, research:api, ...)
+  ./dev restart <service> Restart service by alias (e.g. api, research:worker, ...)
+  ./dev up <profile>      Legacy start: terminal | execution | full
+  ./dev --help            Show this help
+
+Modes for research:
+  --host                  (default) Postgres & Redis in Docker; API and worker run
+                          from q_backend/.venv on host with direct GPU access.
+  --container             Postgres, Redis, API, worker run in Docker on q-backend:dev.
+  --rebuild               Rebuild backend image (container mode only).
+
+Persistence and Lifecycle:
+  Commands return after starting desktop UIs.
+  Closing a UI window or pressing Ctrl+C does NOT tear down either backend.
+  Backends stay running until explicitly stopped via: ./dev down [live|research|all]
 
 Service aliases:
-  postgres, redis, migrate, api, outbox, publisher (market), execution, live,
-  mt5 (terminal-mt5), gateway, edge
-  research/worker are managed by ./research, not ./dev
-
-Environment:
-  Q_DEV_COMPOSE_PROJECT  Docker Compose project name (default: q-dev)
-  Q_DEV_PG_PORT          Postgres port (default: 5434)
-  Q_DEV_REDIS_PORT       Redis port (default: 6380)
-  Q_DEV_API_PORT         API port (default: 8000)
-  Q_DEV_GATEWAY_URL      MT5 gateway base URL (default: http://127.0.0.1:18812)
-  Q_TERMINAL_SYMBOL      q_terminal symbol (default: PETR4; must be in Q_STREAM_SYMBOLS)
-  Q_TERMINAL_TIMEFRAME   q_terminal timeframe (default: M1; must be in Q_STREAM_BAR_TIMEFRAMES)
-  Q_DEV_WAIT_ATTEMPTS    Readiness poll attempts (default: 90)
-  Q_DEV_WAIT_INTERVAL    Seconds between polls (default: 0.5)
-
-See also:
-  ./research   Research/backtests stack (tears down on Ctrl+C)
-  q_backend/docker-compose.yml
+  Live:     postgres, redis, migrate, api, outbox, publisher, execution, live, terminal
+  Shared:   mt5, gateway, edge
+  Research: research:postgres, research:redis, research:migrate, research:api,
+            research:worker, research:relay, research:ui
+  (Unqualified aliases default to live stack; use research:<svc> for research stack.)
 EOF
 }
 
@@ -96,8 +101,9 @@ service_kind() {
     api|outbox|publisher|market|execution) echo "systemd-backend" ;;
     mt5|terminal-mt5|gateway|edge) echo "systemd-mt5" ;;
     live) echo "capability" ;;
-    research|worker) echo "unused" ;;
-    *) die "unknown service alias: $1 (try: api, outbox, publisher, postgres, redis, execution, live, mt5, gateway, edge)" ;;
+    terminal) echo "terminal" ;;
+    research|worker) echo "research" ;;
+    *) die "unknown service alias: $1 (try: api, outbox, publisher, postgres, redis, execution, live, mt5, gateway, edge, terminal)" ;;
   esac
 }
 
@@ -153,6 +159,17 @@ docker_service_running() {
 
 check_port() {
   local port="$1"
+  if [[ -n "${Q_TEST_STATE:-}" ]]; then
+    if [[ -f "$Q_TEST_STATE/ports/$port" ]]; then
+      return 0
+    fi
+    if [[ "$port" == "$PG_PORT" || "$port" == "$REDIS_PORT" ]]; then
+      if [[ -f "$Q_TEST_STATE/compose_state" ]] && grep -q "up" "$Q_TEST_STATE/compose_state" 2>/dev/null; then
+        return 0
+      fi
+    fi
+    return 1
+  fi
   (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
 }
 
@@ -183,6 +200,13 @@ guard_port_conflicts() {
       exit 1
     fi
   done
+  if check_port "$API_PORT"; then
+    if ! ready_api || ! unit_active "$(backend_unit api)"; then
+      echo "error: port $API_PORT is in use by another process or container." >&2
+      echo "hint: check 'lsof -i :$API_PORT' or stop the conflicting service." >&2
+      exit 1
+    fi
+  fi
 }
 
 start_docker_infra() {
@@ -194,10 +218,6 @@ start_docker_infra() {
   echo "==> Starting Postgres and Redis (Docker Compose project: $COMPOSE_PROJECT)..."
   "${COMPOSE[@]}" up -d --wait postgres redis
 
-  # Compose health checks run inside the containers. The host-run migration and
-  # systemd services need the published host ports, so validate those too. A
-  # stale container can remain healthy while Docker has lost its port/network
-  # attachment; recreate only this project's infra containers in that case.
   host_ports_ready=0
   for ((attempt = 0; attempt < 10; attempt++)); do
     if check_port "$PG_PORT" && check_port "$REDIS_PORT"; then
@@ -263,7 +283,6 @@ ensure_backend_env_file() {
     cp "$BACKEND_DIR/deploy/systemd/backend.env.example" "$env_file"
   fi
 
-  # Ensure Docker-hosted endpoints and absolute data roots for systemd units.
   local -a keys=(
     "Q_DATABASE_URL=postgresql+psycopg://q:q@127.0.0.1:${PG_PORT}/q"
     "Q_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0"
@@ -273,7 +292,6 @@ ensure_backend_env_file() {
     "Q_RUNTIME_CONFIG_PATH=$BACKEND_DIR/data/runtime_config.json"
     "Q_MT5_GATEWAY_URL=$GATEWAY_URL"
   )
-  # Mirror the gateway's shared token so the API and publisher can authenticate.
   local gateway_token=""
   if [[ -f "$GATEWAY_ENV_FILE" ]]; then
     gateway_token="$(sed -n 's/^MT5_GATEWAY_TOKEN=//p' "$GATEWAY_ENV_FILE" | tail -n1)"
@@ -286,7 +304,6 @@ ensure_backend_env_file() {
     key="${line%%=*}"
     val="${line#*=}"
     if grep -q "^${key}=" "$env_file"; then
-      # awk + ENVIRON so values containing sed metacharacters (tokens) survive.
       KEY="$key" VAL="$val" awk 'BEGIN { k = ENVIRON["KEY"] "=" }
         index($0, k) == 1 { print k ENVIRON["VAL"]; next } { print }' \
         "$env_file" >"$env_file.tmp" && mv "$env_file.tmp" "$env_file"
@@ -423,6 +440,7 @@ except Exception:
 
 ready_postgres() {
   check_port "$PG_PORT" || return 1
+  if [[ -n "${Q_TEST_STATE:-}" ]]; then return 0; fi
   if command -v pg_isready >/dev/null 2>&1; then
     pg_isready -h 127.0.0.1 -p "$PG_PORT" -U q -d q >/dev/null 2>&1
   elif docker_service_running postgres; then
@@ -434,6 +452,7 @@ ready_postgres() {
 
 ready_redis() {
   check_port "$REDIS_PORT" || return 1
+  if [[ -n "${Q_TEST_STATE:-}" ]]; then return 0; fi
   if command -v redis-cli >/dev/null 2>&1; then
     [[ "$(redis-cli -p "$REDIS_PORT" ping 2>/dev/null)" == "PONG" ]]
   elif docker_service_running redis; then
@@ -469,6 +488,49 @@ ready_mt5_terminal() {
 
 migrate_done() {
   [[ -f "$STATE_DIR/migrate.stamp" ]]
+}
+
+# --- terminal UI process validation ---
+
+validate_terminal_pid() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  local cmd=""
+  if [[ -f "/proc/$pid/cmdline" ]]; then
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  elif command -v ps >/dev/null 2>&1; then
+    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  fi
+  [[ -z "$cmd" ]] && return 0
+  [[ "$cmd" == *"q_terminal"* || "$cmd" == *"terminal"* || "$cmd" == *"make"* ]]
+}
+
+is_terminal_running() {
+  local pidfile="$STATE_DIR/q_terminal.pid"
+  [[ -f "$pidfile" ]] || return 1
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  if kill -0 "$pid" 2>/dev/null && validate_terminal_pid "$pid"; then
+    return 0
+  fi
+  rm -f "$pidfile"
+  return 1
+}
+
+stop_terminal() {
+  local pidfile="$STATE_DIR/q_terminal.pid"
+  [[ -f "$pidfile" ]] || return 0
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if validate_terminal_pid "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      echo "stopped q_terminal"
+    fi
+  fi
+  rm -f "$pidfile"
 }
 
 readiness_summary() {
@@ -536,8 +598,11 @@ readiness_summary() {
         echo "active (waiting for gateway)"
       fi
       ;;
+    terminal)
+      if is_terminal_running; then echo "running"; else echo "stopped"; fi
+      ;;
     research)
-      echo "managed by ./research"
+      echo "see research stack"
       ;;
     mt5)
       if unit_active "$(mt5_unit mt5)"; then echo "active"; else echo "inactive"; fi
@@ -621,7 +686,6 @@ have_wine() {
   command -v wine >/dev/null 2>&1
 }
 
-# Start (or restart, when backend.env changed) a backend unit and wait for it.
 start_backend_unit() {
   local alias="$1" label="$2" check_fn="$3"
   local unit
@@ -639,7 +703,6 @@ start_backend_unit() {
   }
 }
 
-# Live market data for q_terminal: MT5 terminal -> gateway -> publisher -> Redis streams.
 start_market_stack() {
   echo "==> Starting live market data (MT5 terminal, gateway, publisher)..."
 
@@ -658,8 +721,6 @@ start_market_stack() {
     echo "hint: install wine and run q_backend/gateway/setup_wine.sh, then retry" >&2
   fi
 
-  # The publisher pauses and retries while the gateway is unavailable, so it is
-  # always started; it resumes publishing once the gateway comes up.
   start_backend_unit publisher "market-data publisher" ready_publisher
 }
 
@@ -694,10 +755,8 @@ start_profile() {
   local profile="$1"
   ensure_docker
   ensure_systemd_user
-  # Seed MT5 units and env files first so backend.env can mirror the gateway token.
   if have_wine; then
     ensure_mt5_units
-    # Pre-start Wine/MT5 services concurrently with Docker infra and Python backend.
     local -a mt5_early=("$(mt5_unit mt5)" "$(mt5_unit gateway)")
     if [[ "$profile" == "execution" || "$profile" == "full" ]]; then
       mt5_early+=("$(mt5_unit edge)")
@@ -716,12 +775,91 @@ start_profile() {
 launch_terminal() {
   : "${Q_TERMINAL_API_BASE:=http://127.0.0.1:${API_PORT}}"
   : "${Q_TERMINAL_SYMBOL:=PETR4}"
-  # Stream bars carry MT5-style timeframes (M1, M5, ...); q_terminal matches them exactly.
   : "${Q_TERMINAL_TIMEFRAME:=M1}"
   export Q_TERMINAL_API_BASE Q_TERMINAL_SYMBOL Q_TERMINAL_TIMEFRAME
 
-  echo "==> Launching q_terminal (Ctrl+C stops only the terminal; backends keep running)..."
-  exec make -C "$TERMINAL_DIR" run
+  mkdir -p "$STATE_DIR"
+  local pidfile="$STATE_DIR/q_terminal.pid"
+  if [[ -f "$pidfile" ]]; then
+    local pid
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && validate_terminal_pid "$pid"; then
+      echo "q_terminal: already running (PID $pid)"
+      return 0
+    fi
+    rm -f "$pidfile"
+  fi
+
+  echo "==> Launching q_terminal in background..."
+  (
+    exec make -C "$TERMINAL_DIR" run
+  ) >"$STATE_DIR/terminal.log" 2>&1 &
+  local pid=$!
+  echo "$pid" >"$pidfile"
+  echo "q_terminal started (PID $pid, log: $STATE_DIR/terminal.log)"
+}
+
+cmd_live() {
+  start_profile full
+  execution_up_message
+  launch_terminal
+}
+
+cmd_research() {
+  local mode="${Q_RESEARCH_MODE:-host}"
+  local rebuild=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)
+        mode="host"
+        shift
+        ;;
+      --container|--containerized)
+        mode="container"
+        shift
+        ;;
+      --rebuild)
+        rebuild=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1 (try ./dev --help)"
+        ;;
+    esac
+  done
+
+  if [[ "$rebuild" -eq 1 && "$mode" != "container" ]]; then
+    die "--rebuild requires container mode (--container)"
+  fi
+
+  start_research "$mode" "$rebuild"
+}
+
+cmd_all() {
+  echo "==> Starting Live and Research stacks..."
+  local live_fail=0 research_fail=0
+
+  if ! ( cmd_live ); then
+    echo "error: failed to start Live stack" >&2
+    live_fail=1
+  fi
+
+  local res_mode="${Q_RESEARCH_MODE:-host}"
+  if ! ( start_research "$res_mode" 0 ); then
+    echo "error: failed to start Research stack" >&2
+    research_fail=1
+  fi
+
+  if [[ "$live_fail" -ne 0 || "$research_fail" -ne 0 ]]; then
+    echo "==> Start failed. Current stack status:" >&2
+    cmd_status >&2
+    return 1
+  fi
+  echo "==> Both Live and Research stacks started."
 }
 
 cmd_up() {
@@ -746,31 +884,63 @@ cmd_up() {
   esac
 }
 
-stop_systemd_backend() {
-  if ! systemd_available; then
-    return 0
-  fi
-  systemctl --user stop \
-    "$(backend_unit execution)" \
-    "$(backend_unit publisher)" \
-    "$(mt5_unit edge)" \
-    "$(mt5_unit gateway)" \
-    "$(mt5_unit mt5)" \
-    "$(backend_unit outbox)" \
-    "$(backend_unit api)" \
-    2>/dev/null || true
-}
-
 systemd_available() {
   command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1
 }
 
-cmd_down() {
-  stop_systemd_backend
+cmd_down_live() {
+  local keep_shared_gateway="${1:-0}"
+  stop_terminal
+  if systemd_available; then
+    systemctl --user stop \
+      "$(backend_unit execution)" \
+      "$(backend_unit publisher)" \
+      "$(mt5_unit edge)" \
+      "$(backend_unit outbox)" \
+      "$(backend_unit api)" \
+      2>/dev/null || true
+
+    if [[ "$keep_shared_gateway" -eq 1 ]]; then
+      echo "==> Keeping shared MT5 terminal and gateway running (in use by Research stack)"
+    else
+      systemctl --user stop \
+        "$(mt5_unit gateway)" \
+        "$(mt5_unit mt5)" \
+        2>/dev/null || true
+    fi
+  fi
   if command -v docker >/dev/null 2>&1; then
     stop_docker_infra
   fi
-  echo "==> Q dev stack stopped."
+  echo "==> Q live dev stack stopped."
+}
+
+cmd_down_research() {
+  research_down
+}
+
+cmd_down() {
+  local target="${1:-all}"
+  case "$target" in
+    live)
+      local keep_gw=0
+      if is_research_using_gateway; then
+        keep_gw=1
+      fi
+      cmd_down_live "$keep_gw"
+      ;;
+    research)
+      cmd_down_research
+      ;;
+    all)
+      cmd_down_live 0
+      cmd_down_research
+      echo "==> All Q dev stacks stopped."
+      ;;
+    *)
+      die "invalid down target: $target (expected live|research|all)"
+      ;;
+  esac
 }
 
 service_state() {
@@ -814,7 +984,14 @@ service_state() {
         echo "unavailable"
       fi
       ;;
-    unused)
+    terminal)
+      if is_terminal_running; then
+        echo "running (PID $(cat "$STATE_DIR/q_terminal.pid"))"
+      else
+        echo "stopped"
+      fi
+      ;;
+    research)
       echo "not started"
       ;;
   esac
@@ -828,100 +1005,160 @@ service_label() {
     systemd-backend) echo "$(backend_unit "$alias")" ;;
     systemd-mt5) echo "$(mt5_unit "$alias")" ;;
     capability) echo "execution capability" ;;
-    unused) echo "-" ;;
+    terminal) echo "q_terminal" ;;
+    research) echo "-" ;;
   esac
 }
 
 cmd_status() {
-  printf "%-12s %-28s %-18s %s\n" "ALIAS" "SERVICE" "STATE" "READINESS"
-  local aliases=(
+  printf "%-20s %-28s %-18s %s\n" "ALIAS" "SERVICE" "STATE" "READINESS"
+  echo "--- Live stack ---"
+  local live_aliases=(
     postgres redis migrate api outbox
-    mt5 gateway publisher
-    execution live edge
-    research
+    publisher execution live terminal
   )
-  local alias
-  for alias in "${aliases[@]}"; do
-    printf "%-12s %-28s %-18s %s\n" \
+  for alias in "${live_aliases[@]}"; do
+    printf "%-20s %-28s %-18s %s\n" \
       "$alias" \
       "$(service_label "$alias")" \
       "$(service_state "$alias")" \
       "$(readiness_summary "$alias")"
   done
+
+  echo "--- Shared MT5 ---"
+  local shared_aliases=(mt5 gateway edge)
+  for alias in "${shared_aliases[@]}"; do
+    printf "%-20s %-28s %-18s %s\n" \
+      "$alias" \
+      "$(service_label "$alias")" \
+      "$(service_state "$alias")" \
+      "$(readiness_summary "$alias")"
+  done
+
+  echo "--- Research stack ($(research_mode) mode) ---"
+  local research_aliases=(
+    postgres redis migrate api worker relay ui
+  )
+  for bare in "${research_aliases[@]}"; do
+    printf "%-20s %-28s %-18s %s\n" \
+      "research:$bare" \
+      "$(research_service_label "$bare")" \
+      "$(research_service_state "$bare")" \
+      "$(research_readiness "$bare")"
+  done
 }
 
 cmd_logs() {
-  local alias="${1:-api}"
-  local kind
-  kind="$(service_kind "$alias")"
+  local target="${1:-api}"
+  local stack="live"
+  local svc="$target"
+  if [[ "$target" == live:* ]]; then
+    stack="live"
+    svc="${target#live:}"
+  elif [[ "$target" == research:* ]]; then
+    stack="research"
+    svc="${target#research:}"
+  fi
 
-  case "$kind" in
-    docker)
-      exec "${COMPOSE[@]}" logs -f "$(compose_service "$alias")"
+  if [[ "$stack" == "research" ]]; then
+    research_logs "$svc"
+    return
+  fi
+
+  case "$svc" in
+    terminal)
+      local log="$STATE_DIR/terminal.log"
+      [[ -f "$log" ]] || die "log not found: $log"
+      exec tail -f "$log"
       ;;
-    systemd-backend|systemd-mt5)
+    postgres|redis)
+      ensure_docker
+      exec "${COMPOSE[@]}" logs -f "$(compose_service "$svc")"
+      ;;
+    api|outbox|publisher|market|execution|mt5|terminal-mt5|gateway|edge)
       need journalctl
       ensure_systemd_user
       local unit
-      unit="$(systemd_unit "$alias")"
-      unit_installed "$unit" || die "$unit is not installed (run ./dev up terminal first)"
+      unit="$(systemd_unit "$svc")"
+      unit_installed "$unit" || die "$unit is not installed (run ./dev live or ./dev up terminal first)"
       exec journalctl --user -u "$unit" -f
       ;;
     *)
-      die "logs not available for alias: $alias"
+      die "logs not available for alias: $target"
       ;;
   esac
 }
 
 cmd_restart() {
-  local alias="${1:-}"
-  [[ -n "$alias" ]] || die "usage: ./dev restart <service>"
+  local target="${1:-}"
+  [[ -n "$target" ]] || die "usage: ./dev restart <service>"
+  local stack="live"
+  local svc="$target"
+  if [[ "$target" == live:* ]]; then
+    stack="live"
+    svc="${target#live:}"
+  elif [[ "$target" == research:* ]]; then
+    stack="research"
+    svc="${target#research:}"
+  fi
 
-  local kind
-  kind="$(service_kind "$alias")"
+  if [[ "$stack" == "research" ]]; then
+    research_restart "$svc"
+    return
+  fi
 
-  case "$kind" in
-    docker)
+  case "$svc" in
+    terminal)
+      stop_terminal
+      launch_terminal
+      ;;
+    postgres|redis)
       ensure_docker
-      "${COMPOSE[@]}" restart "$(compose_service "$alias")"
-      if [[ "$alias" == postgres ]]; then
+      "${COMPOSE[@]}" restart "$(compose_service "$svc")"
+      if [[ "$svc" == postgres ]]; then
         wait_for "postgres" "${COMPOSE[*]} logs postgres" ready_postgres
       else
         wait_for "redis" "${COMPOSE[*]} logs redis" ready_redis
       fi
       ;;
-    systemd-backend|systemd-mt5)
+    api|outbox|publisher|market|execution|mt5|terminal-mt5|gateway|edge)
       ensure_systemd_user
       local unit
-      unit="$(systemd_unit "$alias")"
-      unit_installed "$unit" || die "$unit is not installed (run ./dev up terminal first)"
+      unit="$(systemd_unit "$svc")"
+      unit_installed "$unit" || die "$unit is not installed"
       systemctl --user restart "$unit"
-      case "$alias" in
+      case "$svc" in
         api) wait_for "api" "journalctl --user -u $unit -n 30 --no-pager" ready_api ;;
         outbox) wait_for "outbox relay" "journalctl --user -u $unit -n 30 --no-pager" ready_outbox ;;
         publisher|market) wait_for "market-data publisher" "journalctl --user -u $unit -n 30 --no-pager" ready_publisher ;;
         execution) wait_for "execution worker (process)" "journalctl --user -u $unit -n 30 --no-pager" execution_worker_process_ready ;;
+        gateway) wait_for "mt5 gateway" "journalctl --user -u $unit -n 30 --no-pager" ready_gateway ;;
+        edge) wait_for "mt5 edge" "journalctl --user -u $unit -n 30 --no-pager" ready_edge ;;
       esac
       echo "restarted $unit"
       ;;
     *)
-      die "cannot restart alias: $alias"
+      die "cannot restart alias: $target"
       ;;
   esac
 }
 
 main() {
-  local cmd="${1:-}"
+  local cmd="${1:-all}"
   case "$cmd" in
-    ""|-h|--help|help)
-      usage
+    ""|all)
+      cmd_all
       ;;
-    up)
+    live)
+      cmd_live
+      ;;
+    research)
       shift
-      cmd_up "${1:-}"
+      cmd_research "$@"
       ;;
     down)
-      cmd_down
+      shift
+      cmd_down "${1:-all}"
       ;;
     status)
       cmd_status
@@ -933,6 +1170,13 @@ main() {
     restart)
       shift
       cmd_restart "${1:-}"
+      ;;
+    up)
+      shift
+      cmd_up "${1:-}"
+      ;;
+    -h|--help|help)
+      usage
       ;;
     *)
       die "unknown command: $cmd (try ./dev --help)"
