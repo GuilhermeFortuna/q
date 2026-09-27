@@ -186,17 +186,35 @@ guard_port_conflicts() {
 }
 
 start_docker_infra() {
+  local attempt host_ports_ready
   mkdir -p \
     "$BACKEND_DIR/data/lake" \
     "$BACKEND_DIR/data/market" \
     "$BACKEND_DIR/data/tick_cache"
   echo "==> Starting Postgres and Redis (Docker Compose project: $COMPOSE_PROJECT)..."
   "${COMPOSE[@]}" up -d --wait postgres redis
+
+  # Compose health checks run inside the containers. The host-run migration and
+  # systemd services need the published host ports, so validate those too. A
+  # stale container can remain healthy while Docker has lost its port/network
+  # attachment; recreate only this project's infra containers in that case.
+  host_ports_ready=0
+  for ((attempt = 0; attempt < 10; attempt++)); do
+    if check_port "$PG_PORT" && check_port "$REDIS_PORT"; then
+      host_ports_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$host_ports_ready" -eq 0 ]]; then
+    echo "==> Host ports are not published; recreating $COMPOSE_PROJECT infrastructure..."
+    "${COMPOSE[@]}" up -d --force-recreate --wait postgres redis
+  fi
 }
 
 stop_docker_infra() {
-  echo "==> Stopping Q-dev Docker containers..."
-  "${COMPOSE[@]}" stop postgres redis 2>/dev/null || true
+  echo "==> Removing Q-dev containers and network (database volumes are preserved)..."
+  "${COMPOSE[@]}" down --remove-orphans 2>/dev/null || true
 }
 
 # --- systemd helpers ---
@@ -404,6 +422,7 @@ except Exception:
 # --- readiness checks ---
 
 ready_postgres() {
+  check_port "$PG_PORT" || return 1
   if command -v pg_isready >/dev/null 2>&1; then
     pg_isready -h 127.0.0.1 -p "$PG_PORT" -U q -d q >/dev/null 2>&1
   elif docker_service_running postgres; then
@@ -414,6 +433,7 @@ ready_postgres() {
 }
 
 ready_redis() {
+  check_port "$REDIS_PORT" || return 1
   if command -v redis-cli >/dev/null 2>&1; then
     [[ "$(redis-cli -p "$REDIS_PORT" ping 2>/dev/null)" == "PONG" ]]
   elif docker_service_running redis; then
@@ -589,11 +609,7 @@ start_terminal_backend() {
   ensure_systemd_user
   guard_port_conflicts
 
-  if ready_postgres && ready_redis; then
-    echo "docker infra: already running"
-  else
-    start_docker_infra
-  fi
+  start_docker_infra
 
   wait_for "postgres" "${COMPOSE[*]} logs postgres" ready_postgres
   wait_for "redis" "${COMPOSE[*]} logs redis" ready_redis

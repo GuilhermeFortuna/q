@@ -386,6 +386,35 @@ export_host_backend_env() {
   export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 }
 
+host_port_open() {
+  timeout 1 bash -c "</dev/tcp/127.0.0.1/$1" >/dev/null 2>&1
+}
+
+ensure_host_compose_ports() {
+  local attempt port host_ports_ready=0
+  for ((attempt = 0; attempt < 10; attempt++)); do
+    if host_port_open "$PG_PORT" && host_port_open "$REDIS_PORT"; then
+      host_ports_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$host_ports_ready" -eq 0 ]]; then
+    echo "host ports are not published; recreating $COMPOSE_PROJECT infrastructure..."
+    "${COMPOSE[@]}" up -d --force-recreate --wait postgres redis \
+      || die "could not recreate $COMPOSE_PROJECT infrastructure (check: ${COMPOSE[*]} logs postgres redis)"
+  fi
+
+  for port in "$PG_PORT" "$REDIS_PORT"; do
+    for ((attempt = 0; attempt < 90; attempt++)); do
+      host_port_open "$port" && break
+      sleep 0.5
+    done
+    host_port_open "$port" \
+      || die "Compose reports healthy containers, but host port $port is unreachable (check: ${COMPOSE[*]} ps and ${COMPOSE[*]} logs)"
+  done
+}
+
 run_host_migrations() {
   echo "migrations: alembic upgrade head ..."
   (cd "$BACKEND_DIR" && "$BACKEND_DIR/.venv/bin/alembic" upgrade head) \
@@ -506,9 +535,8 @@ cleanup() {
   stop_host_process "$RELAY_PID" "relay"
   stop_host_process "$API_PID" "API"
 
-  # Stop only the research project's containers.
-  "${COMPOSE[@]}" stop postgres redis 2>/dev/null || true
-  # Stop containerized profile services; keep named volumes, images, and caches.
+  # Remove only this project's containers and network. Compose keeps named
+  # volumes, images, and caches unless explicitly asked to remove them.
   "${COMPOSE[@]}" --profile containerized down --remove-orphans || true
   echo "Research stack stopped."
 }
@@ -617,6 +645,7 @@ main() {
 
     echo "starting Postgres and Redis ..."
     "${COMPOSE[@]}" up -d --wait postgres redis
+    ensure_host_compose_ports
 
     run_host_migrations
 
