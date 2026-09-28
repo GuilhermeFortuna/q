@@ -70,6 +70,7 @@ setup_workspace() {
   mkdir -p "$ws/tools/dev"
   cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
   chmod +x "$ws/tools/dev/research.sh"
+  cp "$ROOT/tools/dev/shell.sh" "$ws/tools/dev/shell.sh"
   cp "$ROOT/dev" "$ws/dev"
   chmod +x "$ws/dev"
   cp "$RESEARCH_SRC" "$ws/research"

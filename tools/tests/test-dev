@@ -327,6 +327,15 @@ if [[ "${1:-}" == "compose" ]]; then
     exit 0
   fi
   if [[ "$sub" == "up" ]]; then
+    project=""
+    previous=""
+    for arg in "$@"; do
+      if [[ "$previous" == "-p" ]]; then project="$arg"; break; fi
+      previous="$arg"
+    done
+    printf '%s pg=%s redis=%s data=%s\n' "$project" \
+      "${Q_COMPOSE_PG_PORT:-unset}" "${Q_COMPOSE_REDIS_PORT:-unset}" \
+      "${Q_COMPOSE_DATA_DIR:-unset}" >>"$STATE/compose_env.log"
     echo "up" >"$STATE/compose_state"
     exit 0
   fi
@@ -430,6 +439,21 @@ test_all_starts_both_stacks() {
   clean_workspace "$ws"
 }
 
+test_compose_ports_stay_isolated() {
+  local ws recorded
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  run_dev "$ws" all >/dev/null 2>&1 || true
+  recorded="$(cat "$ws/state/compose_env.log" 2>/dev/null || true)"
+  assert_contains "live Compose uses live ports and data" \
+    "q-dev pg=5434 redis=6380 data=$ws/q_backend/data" "$recorded"
+  assert_contains "Research Compose uses Research ports and data" \
+    "q-research pg=5435 redis=6381 data=$ws/q_backend/data/research" "$recorded"
+
+  clean_workspace "$ws"
+}
+
 test_live_dispatch_and_terminal() {
   local ws out
   ws="$(mktemp -d)"
@@ -504,6 +528,7 @@ test_shared_gateway_retention() {
   local ws out
   ws="$(mktemp -d)"
   setup_workspace "$ws"
+  touch "$ws/home/.config/systemd/user/mt5-gateway.service"
 
   # Start both stacks
   run_dev "$ws" all >/dev/null 2>&1 || true
@@ -522,6 +547,28 @@ test_shared_gateway_retention() {
   assert_not_contains "down all does not retain gateway" "Keeping shared MT5 terminal" "$out"
   assert_contains "down all stops all" "All Q dev stacks stopped" "$out"
 
+  clean_workspace "$ws"
+}
+
+test_gateway_retention_uses_research_startup_state() {
+  local ws out
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  touch "$ws/home/.config/systemd/user/mt5-gateway.service"
+
+  run_dev "$ws" all >/dev/null 2>&1 || true
+  out="$(Q_RESEARCH_MT5=off run_dev "$ws" down live 2>&1 || true)"
+  assert_contains "later off setting cannot stop Research's local gateway" \
+    "Keeping shared MT5 terminal and gateway running" "$out"
+  clean_workspace "$ws"
+
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  touch "$ws/home/.config/systemd/user/mt5-gateway.service"
+  Q_RESEARCH_MT5=off run_dev "$ws" all >/dev/null 2>&1 || true
+  out="$(run_dev "$ws" down live 2>&1 || true)"
+  assert_not_contains "later default cannot invent Research gateway use" \
+    "Keeping shared MT5 terminal and gateway running" "$out"
   clean_workspace "$ws"
 }
 
@@ -636,21 +683,33 @@ test_shell_idle_eof() {
   clean_workspace "$ws"
 }
 
+test_shell_exit_is_successful() {
+  local ws status=0
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  run_dev_shell "$ws" 'exit' >/dev/null 2>&1 || status=$?
+  assert_eq "exit closes the prompt successfully" "0" "$status"
+  clean_workspace "$ws"
+}
+
 main() {
   echo "Running dev launcher harness..."
   test_default_starts_both_stacks
   test_all_starts_both_stacks
+  test_compose_ports_stay_isolated
   test_live_dispatch_and_terminal
   test_research_dispatch_and_rebuild
   test_repeated_start_is_idempotent
   test_selective_down
   test_shared_gateway_retention
+  test_gateway_retention_uses_research_startup_state
   test_port_conflict
   test_failed_research_preflight_reports_error_and_keeps_live
   test_status_output
   test_shell_transcript
   test_shell_logs_returns_to_prompt
   test_shell_idle_eof
+  test_shell_exit_is_successful
 
   echo
   echo "passed=$PASS failed=$FAIL"

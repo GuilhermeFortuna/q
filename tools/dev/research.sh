@@ -8,7 +8,6 @@ BACKEND_DIR="$ROOT/q_backend"
 FRONTEND_DIR="$ROOT/q_frontend"
 
 RESEARCH_COMPOSE_PROJECT="${Q_RESEARCH_COMPOSE_PROJECT:-q-research}"
-RESEARCH_COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml" -p "$RESEARCH_COMPOSE_PROJECT")
 RESEARCH_PG_PORT="${Q_RESEARCH_PG_PORT:-5435}"
 RESEARCH_REDIS_PORT="${Q_RESEARCH_REDIS_PORT:-6381}"
 RESEARCH_API_PORT="${Q_RESEARCH_API_PORT:-8001}"
@@ -22,9 +21,16 @@ RESEARCH_BACKEND_IMAGE="${Q_RESEARCH_BACKEND_IMAGE:-q-backend:dev}"
 RESEARCH_BUILD_CACHE_MAX="${Q_RESEARCH_BUILD_CACHE_MAX:-4GB}"
 RESEARCH_MODE="${Q_RESEARCH_MODE:-host}"
 
-# Export Compose ports for research
-export Q_COMPOSE_PG_PORT="$RESEARCH_PG_PORT" Q_COMPOSE_REDIS_PORT="$RESEARCH_REDIS_PORT"
-export Q_COMPOSE_API_PORT="$RESEARCH_API_PORT" Q_COMPOSE_DATA_DIR="$RESEARCH_DATA_DIR"
+# Scope Compose settings to Research commands. This file is sourced by ./dev,
+# whose live Compose project must retain its own exported ports and data root.
+RESEARCH_COMPOSE=(
+  env
+  "Q_COMPOSE_PG_PORT=$RESEARCH_PG_PORT"
+  "Q_COMPOSE_REDIS_PORT=$RESEARCH_REDIS_PORT"
+  "Q_COMPOSE_API_PORT=$RESEARCH_API_PORT"
+  "Q_COMPOSE_DATA_DIR=$RESEARCH_DATA_DIR"
+  docker compose --project-directory "$BACKEND_DIR" -f "$BACKEND_DIR/docker-compose.yml" -p "$RESEARCH_COMPOSE_PROJECT"
+)
 
 FINGERPRINT_LABEL="dev.q.backend.research-fingerprint"
 FORCE_REBUILD=0
@@ -597,6 +603,20 @@ launch_ui() {
   UI_PID="$pid"
 }
 
+record_research_gateway_usage() {
+  # An idempotent start must not change the gateway used by a running backend.
+  if is_process_running api || docker_research_service_running backend; then
+    return 0
+  fi
+
+  local marker="$RESEARCH_PID_DIR/local-gateway"
+  rm -f "$marker"
+  if [[ "${Q_RESEARCH_MT5:-auto}" != "off" &&
+        "${Q_MT5_GATEWAY_URL:-}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+    : >"$marker"
+  fi
+}
+
 start_research() {
   local mode="${1:-$MODE}"
   local rebuild="${2:-0}"
@@ -636,6 +656,7 @@ start_research() {
     ensure_backend_image
     check_worker_cuda
     prepare_mt5_gateway
+    record_research_gateway_usage
     local -a compose_cmd=("${RESEARCH_COMPOSE[@]}")
     if [[ -n "${Q_MT5_GATEWAY_URL:-}" ]]; then
       compose_cmd+=(-f "$ROOT/tools/research-gateway-compose.yml")
@@ -650,6 +671,7 @@ start_research() {
     ensure_backend_venv
     check_host_cuda
     prepare_mt5_gateway
+    record_research_gateway_usage
     export_host_backend_env
 
     LOG_DIR="$RESEARCH_LOG_DIR"
@@ -702,7 +724,8 @@ research_down() {
     "${RESEARCH_COMPOSE[@]}" --profile containerized down --remove-orphans 2>/dev/null || true
   fi
 
-  rm -f "$RESEARCH_PID_DIR"/*.pid "$RESEARCH_PID_DIR/mode" 2>/dev/null || true
+  rm -f "$RESEARCH_PID_DIR"/*.pid "$RESEARCH_PID_DIR/mode" \
+    "$RESEARCH_PID_DIR/local-gateway" 2>/dev/null || true
   echo "Research stack stopped."
 }
 
@@ -725,9 +748,7 @@ is_research_running() {
 
 is_research_using_gateway() {
   is_research_running || return 1
-  [[ "${Q_RESEARCH_MT5:-auto}" != "off" ]] || return 1
-  local g_url="${Q_MT5_GATEWAY_URL:-http://127.0.0.1:18812}"
-  [[ "$g_url" =~ ^https?://(127\.0\.0\.1|localhost) ]]
+  [[ -f "$RESEARCH_PID_DIR/local-gateway" ]]
 }
 
 research_mode() {

@@ -113,8 +113,11 @@ cmd_shell() {
       echo
       break
     fi
-    shell_handle_line "$line"
-    rc=$?
+    if shell_handle_line "$line"; then
+      rc=0
+    else
+      rc=$?
+    fi
     if [[ $rc -eq 2 ]]; then
       break
     fi
