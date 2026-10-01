@@ -19,10 +19,10 @@
 
 ## Ordered implementation
 
-- [ ] 1. Extend tools/tests/test-dev with subprocess launch fixtures for unset, empty, explicit and one-field-only target environments; assert the actual environment seen by mocked make.
-- [ ] 2. Adjust launch_terminal in dev to stop synthesizing target values, normalize empty overrides to absence and retain API-base export.
-- [ ] 3. Exercise all/default, live, legacy and shell dispatch plus already-running pidfile reuse in the mock harness. Confirm no shell command reads q_terminal workspace files.
-- [ ] 4. Update README.md target examples and precedence; run bash -n dev and tools/tests/test-dev, commit and report focused results.
+- [x] 1. Extend tools/tests/test-dev with subprocess launch fixtures for unset, empty, explicit and one-field-only target environments; assert the actual environment seen by mocked make.
+- [x] 2. Adjust launch_terminal in dev to stop synthesizing target values, normalize empty overrides to absence and retain API-base export.
+- [x] 3. Exercise all/default, live, legacy and shell dispatch plus already-running pidfile reuse in the mock harness. Confirm no shell command reads q_terminal workspace files.
+- [x] 4. Update README.md target examples and precedence; run bash -n dev and tools/tests/test-dev, commit and report focused results.
 
 ## Review focus
 

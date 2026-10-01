@@ -790,9 +790,19 @@ start_profile() {
 
 launch_terminal() {
   : "${Q_TERMINAL_API_BASE:=http://127.0.0.1:${API_PORT}}"
-  : "${Q_TERMINAL_SYMBOL:=PETR4}"
-  : "${Q_TERMINAL_TIMEFRAME:=M1}"
-  export Q_TERMINAL_API_BASE Q_TERMINAL_SYMBOL Q_TERMINAL_TIMEFRAME
+  export Q_TERMINAL_API_BASE
+
+  if [[ -n "${Q_TERMINAL_SYMBOL:-}" ]]; then
+    export Q_TERMINAL_SYMBOL
+  else
+    unset Q_TERMINAL_SYMBOL
+  fi
+
+  if [[ -n "${Q_TERMINAL_TIMEFRAME:-}" ]]; then
+    export Q_TERMINAL_TIMEFRAME
+  else
+    unset Q_TERMINAL_TIMEFRAME
+  fi
 
   mkdir -p "$STATE_DIR"
   local pidfile="$STATE_DIR/q_terminal.pid"
