@@ -215,6 +215,10 @@ EOF
   cat >"$ws/bin/make" <<'EOF'
 #!/usr/bin/env bash
 echo "make $*" >>"${Q_TEST_STATE}/make.log"
+sym="${Q_TERMINAL_SYMBOL-<absent>}"
+tf="${Q_TERMINAL_TIMEFRAME-<absent>}"
+api="${Q_TERMINAL_API_BASE-<absent>}"
+echo "sym=$sym tf=$tf api=$api" >>"${Q_TEST_STATE}/terminal_env.log"
 sleep 60
 EOF
 
@@ -413,9 +417,22 @@ run_dev_shell() {
   )
 }
 
+wait_for_file_lines() {
+  local file="$1" min_lines="${2:-1}"
+  local elapsed=0
+  while [[ "$elapsed" -lt 2000 ]]; do
+    if [[ -f "$file" ]] && [[ $(wc -l <"$file" 2>/dev/null || echo 0) -ge "$min_lines" ]]; then
+      return 0
+    fi
+    sleep 0.02
+    elapsed=$((elapsed + 20))
+  done
+}
+
 clean_workspace() {
   local ws="$1"
   run_dev "$ws" down all >/dev/null 2>&1 || true
+  chmod -R u+rwx "$ws" 2>/dev/null || true
   rm -rf "$ws" 2>/dev/null || rm -rf "$ws" 2>/dev/null || true
 }
 
@@ -692,6 +709,210 @@ test_shell_exit_is_successful() {
   clean_workspace "$ws"
 }
 
+test_terminal_target_unset() {
+  local ws last_env
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    unset Q_TERMINAL_SYMBOL Q_TERMINAL_TIMEFRAME
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "unset target variables are absent to terminal" \
+    "sym=<absent> tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+}
+
+test_terminal_target_empty_normalizes_to_absence() {
+  local ws last_env
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TERMINAL_SYMBOL=""
+    export Q_TERMINAL_TIMEFRAME=""
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "empty target variables normalize to absence" \
+    "sym=<absent> tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+}
+
+test_terminal_target_explicit_preserved_byte_for_byte() {
+  local ws last_env
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TERMINAL_SYMBOL="VALE3"
+    export Q_TERMINAL_TIMEFRAME="5m"
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "explicit target variables preserved byte-for-byte" \
+    "sym=VALE3 tf=5m api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+}
+
+test_terminal_target_one_field_only() {
+  local ws last_env
+
+  # Explicit symbol, unset timeframe
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TERMINAL_SYMBOL="ITUB4"
+    unset Q_TERMINAL_TIMEFRAME
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "explicit symbol with unset timeframe keeps timeframe absent" \
+    "sym=ITUB4 tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+
+  # Unset symbol, explicit timeframe
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    unset Q_TERMINAL_SYMBOL
+    export Q_TERMINAL_TIMEFRAME="15m"
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "unset symbol with explicit timeframe keeps symbol absent" \
+    "sym=<absent> tf=15m api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+
+  # Explicit symbol, empty timeframe
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TERMINAL_SYMBOL="B3SA3"
+    export Q_TERMINAL_TIMEFRAME=""
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "explicit symbol with empty timeframe normalizes timeframe to absence" \
+    "sym=B3SA3 tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+
+  # Empty symbol, explicit timeframe
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  (
+    export Q_TERMINAL_SYMBOL=""
+    export Q_TERMINAL_TIMEFRAME="1h"
+    run_dev "$ws" live >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "empty symbol with explicit timeframe normalizes symbol to absence" \
+    "sym=<absent> tf=1h api=http://127.0.0.1:8000" "$last_env"
+  clean_workspace "$ws"
+}
+
+test_terminal_launch_paths_and_pidfile_reuse() {
+  local ws last_env out lines_count
+
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # 1. Default / all dispatch
+  (
+    unset Q_TERMINAL_SYMBOL Q_TERMINAL_TIMEFRAME
+    run_dev "$ws" all >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "all dispatch launches terminal with common absent target" \
+    "sym=<absent> tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+
+  # 2. Pidfile reuse: running all again should NOT launch make again
+  out="$(run_dev "$ws" all 2>&1 || true)"
+  assert_contains "repeated all reports terminal already running" "q_terminal: already running" "$out"
+  lines_count="$(wc -l <"$ws/state/terminal_env.log" 2>/dev/null || echo 0)"
+  assert_eq "already running terminal does not invoke make again" "1" "$lines_count"
+
+  # 3. Clean and test legacy up terminal
+  run_dev "$ws" down all >/dev/null 2>&1 || true
+  rm -f "$ws/state/terminal_env.log"
+  (
+    export Q_TERMINAL_SYMBOL="PETR4"
+    unset Q_TERMINAL_TIMEFRAME
+    run_dev "$ws" up terminal >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "up terminal dispatch respects target environment" \
+    "sym=PETR4 tf=<absent> api=http://127.0.0.1:8000" "$last_env"
+
+  # 4. Clean and test legacy up full
+  run_dev "$ws" down all >/dev/null 2>&1 || true
+  rm -f "$ws/state/terminal_env.log"
+  (
+    unset Q_TERMINAL_SYMBOL
+    export Q_TERMINAL_TIMEFRAME="5m"
+    run_dev "$ws" up full >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "up full dispatch respects target environment" \
+    "sym=<absent> tf=5m api=http://127.0.0.1:8000" "$last_env"
+
+  # 5. Clean and test interactive shell dispatch
+  run_dev "$ws" down all >/dev/null 2>&1 || true
+  rm -f "$ws/state/terminal_env.log"
+  (
+    export Q_TERMINAL_SYMBOL="MGLU3"
+    export Q_TERMINAL_TIMEFRAME="15m"
+    run_dev_shell "$ws" $'up live\nexit\n' >/dev/null 2>&1 || true
+  )
+  wait_for_file_lines "$ws/state/terminal_env.log" 1
+  last_env="$(tail -n 1 "$ws/state/terminal_env.log" 2>/dev/null || true)"
+  assert_eq "shell up live dispatch shares common launch handler" \
+    "sym=MGLU3 tf=15m api=http://127.0.0.1:8000" "$last_env"
+
+  clean_workspace "$ws"
+}
+
+test_launcher_does_not_read_workspace_files() {
+  local ws out refs
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+
+  # Create terminal workspace structure with unreadable permissions
+  mkdir -p "$ws/home/.config/q_terminal/workspaces"
+  cat >"$ws/home/.config/q_terminal/workspaces/Trading.toml" <<'EOF'
+schema_version = 3
+name = "Trading"
+[chart_preferences.chart]
+symbol = "SAVED_SYM"
+timeframe = "15m"
+EOF
+  cat >"$ws/home/.config/q_terminal/state.toml" <<'EOF'
+last_workspace = "Trading"
+EOF
+  # Make the q_terminal configuration directory completely unreadable to prove
+  # launcher never touches or reads workspace files directly.
+  chmod 000 "$ws/home/.config/q_terminal"
+
+  out="$(run_dev "$ws" live 2>&1 || true)"
+  assert_contains "launcher succeeds without touching q_terminal workspace files" "q_terminal started" "$out"
+
+  # Restore permissions for cleanup
+  chmod 755 "$ws/home/.config/q_terminal"
+  clean_workspace "$ws"
+
+  # Also assert that launcher source scripts contain no q_terminal workspace references
+  refs="$(grep -E 'q_terminal/workspaces|\.config/q_terminal|workspaces/.*\.toml' "$ROOT/dev" "$ROOT/tools/dev/"* 2>/dev/null || true)"
+  assert_eq "no workspace file references in launcher scripts" "" "$refs"
+}
+
 main() {
   echo "Running dev launcher harness..."
   test_default_starts_both_stacks
@@ -710,6 +931,12 @@ main() {
   test_shell_logs_returns_to_prompt
   test_shell_idle_eof
   test_shell_exit_is_successful
+  test_terminal_target_unset
+  test_terminal_target_empty_normalizes_to_absence
+  test_terminal_target_explicit_preserved_byte_for_byte
+  test_terminal_target_one_field_only
+  test_terminal_launch_paths_and_pidfile_reuse
+  test_launcher_does_not_read_workspace_files
 
   echo
   echo "passed=$PASS failed=$FAIL"

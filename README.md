@@ -220,9 +220,31 @@ dev> exit              # does not stop remaining stacks
 
 `./dev` provides unified lifecycle management across both stacks:
 - **Persistent lifecycle**: launcher commands return after launching desktop UIs. Closing a UI window or pressing Ctrl+C does not stop backend services. Backends stay running until explicitly stopped via `./dev down [live|research|all]`.
-- **Live stack**: Docker Compose (`q-dev` project) provides Postgres (`5434`) and Redis (`6380`); systemd user units supervise the API (`8000`), outbox relay, market-data publisher, execution worker, and MT5 (Wine) services. `q_terminal` defaults to `PETR4`/`M1` (override with `Q_TERMINAL_SYMBOL`/`Q_TERMINAL_TIMEFRAME`).
+- **Live stack**: Docker Compose (`q-dev` project) provides Postgres (`5434`) and Redis (`6380`); systemd user units supervise the API (`8000`), outbox relay, market-data publisher, execution worker, and MT5 (Wine) services. `q_terminal` reopens the saved target from the active workspace, or defaults to `PETR4` · `1m` on first run.
 - **Research stack**: Docker Compose (`q-research` project) provides isolated Postgres (`5435`) and Redis (`6381`); backend API (`8001`), Dramatiq worker, and relay run with GPU acceleration, pointing the Research UI at port 8001.
 - **Compatibility**: `./research` is a backward-compatible shim that forwards directly to `./dev research "$@"`. Legacy `./dev up [terminal|execution|full]` profile invocations remain supported.
+
+#### Terminal chart target and precedence
+
+When starting the live stack (`./dev`, `./dev live`, `./dev all`, or `dev> up live`), `q_terminal` resolves its initial chart target through the following field-by-field precedence hierarchy:
+
+1. **Explicit environment variables (`Q_TERMINAL_SYMBOL`, `Q_TERMINAL_TIMEFRAME`)**: Non-empty caller variables take highest precedence as a **session-only override** without altering the saved workspace target on disk. Unset or empty variables normalize to absence, letting saved targets restore naturally.
+2. **Saved workspace preferences**: The target (`symbol`, `timeframe`, `mode`, `followed_deployment_id`) saved in the active workspace's chart preferences.
+3. **Configuration file (`config.toml` / `terminal.toml`)**: User-configured `symbol` and `timeframe`.
+4. **Hardcoded defaults**: `PETR4` · `1m`.
+
+Examples:
+
+```bash
+# Reopen last saved workspace chart target (or PETR4 / 1m on first launch)
+./dev live
+
+# Override symbol and timeframe for this session only (without mutating saved workspace state)
+Q_TERMINAL_SYMBOL=VALE3 Q_TERMINAL_TIMEFRAME=5m ./dev live
+
+# Override timeframe for this session while restoring saved symbol
+Q_TERMINAL_TIMEFRAME=15m ./dev live
+```
 
 ### Research / Backtests
 
