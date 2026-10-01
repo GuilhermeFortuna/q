@@ -10,14 +10,14 @@ Open q_terminal with the previous symbol, timeframe, studies, layout and setting
 
 | Task | Repository | Depends on | Issue |
 | --- | --- | --- | --- |
-| Q-077 — Automatic terminal setup persistence | q_terminal | Q-076 | Publication pending |
-| Q-078 — Launcher respects saved terminal setup | q | Q-077 | Publication pending |
-| Q-079 — Trade stream and session history contracts | q_contracts | Q-009 | Publication pending |
-| Q-080 — Session trade ingestion and replay | q_backend | Q-079 | Publication pending |
-| Q-081 — Deterministic volume analysis kernels | q_core | Q-074, Q-079 | Publication pending |
-| Q-082 — Tape panel and volume studies | q_terminal | Q-077, Q-080, Q-081 | Publication pending |
-| Q-083 — Explainable market context kernels | q_core | Q-074 | Publication pending |
-| Q-084 — Live context, evidence and confirmed changes | q_terminal | Q-077, Q-082, Q-083 | Publication pending |
+| Q-077 — Automatic terminal setup persistence | q_terminal | Q-076 | [Q-077](https://github.com/GuilhermeFortuna/q_terminal/issues/27) |
+| Q-078 — Launcher respects saved terminal setup | q | Q-077 | [Q-078](https://github.com/GuilhermeFortuna/q/issues/3) |
+| Q-079 — Trade stream and session history contracts | q_contracts | Q-009 | [Q-079](https://github.com/GuilhermeFortuna/q_contracts/issues/12) |
+| Q-080 — Session trade ingestion and replay | q_backend | Q-079 | [Q-080](https://github.com/GuilhermeFortuna/q_backend/issues/25) |
+| Q-081 — Deterministic volume analysis kernels | q_core | Q-074, Q-079 | [Q-081](https://github.com/GuilhermeFortuna/q_core/issues/12) |
+| Q-082 — Tape panel and volume studies | q_terminal | Q-077, Q-080, Q-081 | [Q-082](https://github.com/GuilhermeFortuna/q_terminal/issues/28) |
+| Q-083 — Explainable market context kernels | q_core | Q-074 | [Q-083](https://github.com/GuilhermeFortuna/q_core/issues/13) |
+| Q-084 — Live context, evidence and confirmed changes | q_terminal | Q-077, Q-082, Q-083 | [Q-084](https://github.com/GuilhermeFortuna/q_terminal/issues/29) |
 
 ## Delivery order
 
