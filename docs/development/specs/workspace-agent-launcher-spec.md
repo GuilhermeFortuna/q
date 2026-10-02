@@ -231,7 +231,36 @@ and the rendered prompt, and changes nothing (no branch, worktree, status or lau
 4. Set status to `Done`.
 5. Close the issue with a comment naming the branch and each repository's merge commit SHA.
 
-### 2.8 Prompt template
+### 2.8 `work inspect <ID> [--dry-run]` / `work inspect --restore [--dry-run]`
+
+Human review selects the task branch in the owning repository's normal checkout and every
+other workspace repository containing that exact branch, sharing discovery with `finish`.
+The task must be `In Review`; the workspace root can own a task or participate alongside
+product repositories. Existing task worktrees
+remain detached at their current commits while normal checkouts use the task branch.
+
+Preflight all targets before switching: require clean tracked and untracked state (ignored
+files allowed), valid registered worktrees, and no unexpected worktree holding the task branch.
+Save original branches or detached commits in a versioned atomic journal under `.worktrees/`.
+Serialize inspect, restore, and finish using a workspace lock. A switch failure attempts
+rollback; interrupted operations can be recovered with `inspect --restore` offline.
+Refuse checkout collisions that would overwrite ignored local files. When the workspace
+root participates, preserve a source-independent recovery runner under `.worktrees/` and
+print its restore and finish commands before switching. Remove it after journal completion.
+
+Restore original checkout states without dropping review commits or detached-worktree work.
+Refuse dirty or unexpected state; retain the journal until recovery succeeds. One inspection
+may be active; repeating the same task verifies state, and another requires restoration.
+Dry-run performs validation without mutation. Neither inspect nor restore changes GitHub
+state, starts services, installs dependencies, merges, or pushes. The user stops services
+and closes UIs before switching, then runs `./dev` normally.
+
+Finish may run directly on the inspected task and clears inspection state on success.
+Finishing another task is refused. Failed finish retains retry state; once finishing starts,
+restore is disabled and the user retries finish. A retry must preserve unexpected detached
+commits and handle a board update that succeeded before issue closing failed.
+
+### 2.9 Prompt template
 
 `prompts/implement.md` uses `string.Template` placeholders:
 `$id $title $repo $issue_url $spec $plan $workdir $branch $resume $repo_agents $workspace`

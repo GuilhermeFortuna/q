@@ -9,6 +9,7 @@ up to date, and merges the finished work into `development` once you approve it.
 - `[work start](#work-start)` — start or resume a task with an agent
 - `[work board show](#work-board-show)` — inspect a task
 - `[work board set](#work-board-set)` — status updates (used by agents)
+- [work inspect](#work-inspect) — select reviewed task branches, or restore checkouts
 - `[work finish](#work-finish)` — merge a reviewed task and mark it Done
 - [Agents, effort and models](#agents-effort-and-models)
 - [Branch mode vs worktree mode](#branch-mode-vs-worktree-mode)
@@ -43,7 +44,8 @@ from anywhere.
                                    works on branch Q-010-…
                                    commits locally (never pushes)
                                    ./work board set Q-010 in-review → In Review
-                                                                      review the branch
+                                                                      ./work inspect Q-010
+                                                                      ./dev (run and review)
                                                                       ./work finish Q-010 → Done
 ```
 
@@ -216,6 +218,80 @@ Rules enforced by the tool:
 ---
 
 
+
+## `work inspect`
+
+Selects an `In Review` task for runtime review using the normal workspace checkouts.
+
+```bash
+./work inspect ID [--dry-run]
+./work inspect --restore [--dry-run]
+```
+
+Before inspecting or restoring, stop stacks with `./dev down` and close desktop UIs.
+Inspect prepares source checkouts; it does not stop services, install dependencies, or launch
+the project. Afterward, use `./dev live`, `./dev research`, or `./dev` as usual. Existing
+launcher dependency setup and build behavior still applies.
+
+The command selects the owning repository and every cloned workspace repository containing
+the exact task branch, using the same discovery as `finish`. Workspace-owned tasks are
+supported. Repositories without that branch are untouched.
+The workspace root `q` can also participate alongside a product repository when it has
+the same task branch.
+
+All affected checkouts must have no uncommitted or untracked files. Ignored environments,
+data, and build artifacts are allowed. The command validates registered worktrees and refuses
+missing, locked, or unexpected worktree locations before switching sources.
+Switches also refuse to overwrite ignored local files when the selected branch tracks
+the same path; move those files somewhere safe before retrying.
+
+Existing task worktrees in `.worktrees/<repo>/<branch>` are preserved, detached at their current
+commits so that Git can check out the task branch in the normal checkout. Their files and
+build directories remain available. If the normal checkout already uses the task branch,
+it stays there.
+
+Run `./work inspect --restore` to restore each normal checkout's original branch or detached
+commit and reattach task worktrees that originally held the task branch. Restore uses local
+state and requires no GitHub access. Commits made on the task branch during review remain
+on that branch; reattached task worktrees receive its current tip. Dirty checkouts, unexpected
+branch changes, or new detached-worktree commits block restoration until you preserve or
+resolve that work. Original branches must remain available and not be checked out elsewhere.
+
+Only one inspection can be active. Repeating inspection of the same task verifies its
+checkout state; selecting another task requires restoring first. Inspection and restoration
+never update the board, post comments, merge, or push. `--dry-run` validates and previews
+either operation without writing state or changing checkouts.
+
+A versioned recovery journal lives in `.worktrees/inspect.json`; `.worktrees/inspect.lock`
+serializes inspect, restore, and finish operations. Preserve the journal until the tool
+clears it. Ordinary switch failures attempt restoration automatically. After an interruption,
+run `./work inspect --restore`; an interrupted restoration can be retried with the same command.
+If recovery fails, the journal is retained and the error identifies what needs attention.
+
+When `q` itself participates, inspection saves a source-independent copy of the running tool
+at `.worktrees/inspect-runner/work`. The selected branch may contain an older `./work` without
+inspection support. In that case, use `.worktrees/inspect-runner/work inspect --restore` or
+`.worktrees/inspect-runner/work finish ID` from the workspace root (or use its absolute path).
+This local runner uses the current Python interpreter and needs no downloads for restoration.
+It is removed when the inspection session completes.
+
+Alternatively, run `./work finish ID` directly while inspecting that task. Successful finish
+clears inspection state and leaves normal checkouts on `development`. Finishing another task
+is refused. Once finish starts, restoration is disabled because it cannot undo merges:
+resolve failures and retry `./work finish ID`. Detached commits created after a failed finish
+must be preserved before retrying. Retries also support a board update that succeeded before
+issue closing failed.
+
+```bash
+./work inspect Q-010 --dry-run
+./work inspect Q-010
+./dev research
+# After stopping the running project and closing its UI:
+./work inspect --restore  # postpone merging
+# Or: ./work finish Q-010
+```
+
+---
 
 ## `work finish`
 

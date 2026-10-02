@@ -62,6 +62,14 @@ resume through the documented workflow once it is restored.
 - `q-workspace/` is a symlink view for the Serena code-navigation server. Never edit files
   through it; use the real repository paths.
 - `.worktrees/` holds task worktrees created by `./work start --worktree`.
+- Human review uses `./work inspect <ID>` after `In Review`: normal checkouts switch to
+  the task branches, while task worktrees remain temporarily detached. Stop stacks with
+  `./dev down` and close desktop UIs before inspect or restore; then run `./dev` normally.
+  `./work inspect --restore` restores previous checkout states without GitHub access.
+  If inspection switches `q` itself to older launcher code, use the printed recovery
+  command at `.worktrees/inspect-runner/work` for restore or finish.
+  Alternatively, `./work finish <ID>` merges directly and clears the inspection session.
+  Only one inspection is active at a time; agents must leave its checkout state alone.
 - The `q/` meta-repo itself tracks only workspace files (`AGENTS.md`, `README.md`, `docs/`,
   `tools/`, `work`, `dev`, `research`, `q-workspace/`).
 
@@ -84,7 +92,7 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
 
 - Work only on the task you were launched for. If asked to implement a board task that is not
   already `In Progress`, ask the human to launch it with `./work start <ID> --agent <agent>`.
-- Inspect a task with `./work board show <ID>`.
+- Read task metadata with `./work board show <ID>`. `./work inspect` is for human runtime review.
 - When the work is complete and checks pass:
   `./work board set <ID> in-review -m "<what was done; checks run and results; open follow-ups>"`
 - When you cannot continue:

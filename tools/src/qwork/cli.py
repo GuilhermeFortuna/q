@@ -17,7 +17,7 @@ def _default_models() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="work", description="Launch and finish Q board tasks with AI coding agents.")
+    parser = argparse.ArgumentParser(prog="work", description="Launch, inspect, and finish Q board tasks.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="start or resume a task with an agent")
@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--model", help=f"model passed to the agent (defaults: {_default_models()})")
     start.add_argument("--worktree", action="store_true", help="work in q/.worktrees instead of the repo checkout")
     start.add_argument("--dry-run", action="store_true", help="check and print the prompt without changing anything")
+
+    inspect = sub.add_parser("inspect", help="select reviewed task branches locally, or restore checkouts")
+    inspect.add_argument("task_id", metavar="ID", nargs="?")
+    inspect.add_argument("--restore", action="store_true", help="restore the original checkouts without GitHub access")
+    inspect.add_argument("--dry-run", action="store_true", help="validate and preview without changing anything")
 
     finish = sub.add_parser("finish", help="merge a reviewed task into development and mark it Done")
     finish.add_argument("task_id", metavar="ID")
@@ -54,6 +59,10 @@ def main(argv: list[str] | None = None, ctx: Context | None = None) -> int:
             from qwork.start import start
 
             return start(ctx, args.task_id, args.agent, args.effort, args.model, args.worktree, args.dry_run)
+        if args.command == "inspect":
+            from qwork.inspection import inspect
+
+            return inspect(ctx, args.task_id, args.restore, args.dry_run)
         if args.command == "finish":
             from qwork.finish import finish
 
@@ -63,7 +72,7 @@ def main(argv: list[str] | None = None, ctx: Context | None = None) -> int:
         if args.board_command == "show":
             return board_show(ctx, args.task_id)
         return board_set(ctx, args.task_id, args.target, args.message)
-    except QworkError as exc:
+    except (QworkError, OSError) as exc:
         print(f"work: {exc}", file=ctx.err)
         return 1
 

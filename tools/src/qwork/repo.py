@@ -13,6 +13,14 @@ INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
 
 
 @dataclass(frozen=True)
+class Worktree:
+    path: Path
+    head: str
+    branch: str
+    unavailable: bool
+
+
+@dataclass(frozen=True)
 class TaskFiles:
     repo: Path
     spec: Path
@@ -74,6 +82,25 @@ class Git:
     def current_branch(self) -> str:
         return self._git("branch", "--show-current").strip()
 
+    def head(self, revision: str = "HEAD") -> str:
+        return self._git("rev-parse", "--verify", revision).strip()
+
+    def detach(self, commit: str) -> None:
+        self._git("checkout", "--quiet", "--detach", "--no-overwrite-ignore", commit)
+
+    def worktrees(self) -> list[Worktree]:
+        """Use NUL records so spaces and newlines in paths remain unambiguous."""
+        trees = []
+        for record in self._git("worktree", "list", "--porcelain", "-z").split("\0\0"):
+            fields = dict(field.partition(" ")[::2] for field in record.split("\0") if field)
+            if "worktree" in fields:
+                trees.append(Worktree(
+                    Path(fields["worktree"]).resolve(), fields.get("HEAD", ""),
+                    fields.get("branch", "").removeprefix("refs/heads/"),
+                    "locked" in fields or "prunable" in fields or "bare" in fields,
+                ))
+        return trees
+
     def is_dirty(self, include_untracked: bool = False) -> bool:
         mode = "normal" if include_untracked else "no"
         return bool(self._git("status", "--porcelain", f"--untracked-files={mode}").strip())
@@ -87,8 +114,9 @@ class Git:
     def create_branch(self, name: str, start: str) -> None:
         self._git("branch", name, start)
 
-    def checkout(self, name: str) -> None:
-        self._git("checkout", "--quiet", name)
+    def checkout(self, name: str, *, preserve_ignored: bool = False) -> None:
+        options = ("--no-overwrite-ignore",) if preserve_ignored else ()
+        self._git("checkout", "--quiet", *options, name)
 
     def add_worktree(self, path: Path, branch: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

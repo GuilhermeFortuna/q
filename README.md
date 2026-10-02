@@ -154,6 +154,9 @@ Agents are launched from the workspace root with `./work` (requires `uv` and an 
 ./work start Q-010 --agent cursor --model sonnet-5 --effort high
 ./work start Q-010 --agent antigravity --dry-run  # print the prompt, change nothing
 ./work board show Q-010
+./work inspect Q-010                           # select all involved task branches for local review
+./dev research                                # run the selected code (or ./dev live / ./dev)
+./work inspect --restore                      # return to previous checkouts if postponing the merge
 ./work finish Q-010 [--push]                    # In Review → merge --no-ff into development → Done
 ./work finish Q-029                             # in q_core, also bumps, checks, tags and pushes the release
 ```
