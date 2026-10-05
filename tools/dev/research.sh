@@ -397,7 +397,7 @@ validate_pid() {
 
   case "$expected" in
     api) [[ "$cmd" == *"uvicorn"* || "$cmd" == *"q_backend.api.main"* ]] ;;
-    worker) [[ "$cmd" == *"worker"* ]] ;;
+    worker) [[ "$cmd" == *"worker"* || "$cmd" == *"-m dramatiq q_backend.tasks"* ]] ;;
     relay) [[ "$cmd" == *"q-outbox-relay"* ]] ;;
     ui) [[ "$cmd" == *"tauri"* || "$cmd" == *"pnpm"* || "$cmd" == *"vite"* || "$cmd" == *"node"* ]] ;;
     pool) [[ "$cmd" == *"pool"* ]] ;;
@@ -423,7 +423,8 @@ is_process_running() {
   if kill -0 "$pid" 2>/dev/null && validate_pid "$pid" "$name"; then
     return 0
   fi
-  rm -f "$pidfile"
+  # Status must not destroy tracking when called from a restricted PID namespace.
+  # Start and stop own stale-file cleanup.
   return 1
 }
 

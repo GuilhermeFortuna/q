@@ -227,6 +227,12 @@ dev> exit              # does not stop remaining stacks
 - **Research stack**: Docker Compose (`q-research` project) provides isolated Postgres (`5435`) and Redis (`6381`); backend API (`8001`), Dramatiq worker, and relay run with GPU acceleration, pointing the Research UI at port 8001.
 - **Compatibility**: `./research` is a backward-compatible shim that forwards directly to `./dev research "$@"`. Legacy `./dev up [terminal|execution|full]` profile invocations remain supported.
 
+Research host-worker tracking recognizes the Dramatiq process after the worker entrypoint
+execs Python, so repeated starts reuse the running pool and `down` stops it. Status checks
+leave PID files intact. Run lifecycle commands from the host session: an isolated agent
+sandbox may not see host processes, Docker, or user services and cannot reliably report or
+stop them.
+
 #### Terminal chart target and precedence
 
 When starting the live stack (`./dev`, `./dev live`, `./dev all`, or `dev> up live`), `q_terminal` resolves its initial chart target through the following field-by-field precedence hierarchy:

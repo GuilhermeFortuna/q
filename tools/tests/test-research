@@ -699,6 +699,63 @@ test_warm_container_launch_does_not_prune() {
   rm -rf "$ws"
 }
 
+test_dramatiq_worker_tracking_survives_exec() {
+  local ws leader second running stopped
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  # The real worker entrypoint execs Python, so "worker" leaves its command line.
+  cat >"$ws/q_backend/.venv/bin/worker" <<'EOF'
+#!/usr/bin/env bash
+exec -a 'python -m dramatiq q_backend.tasks' sleep 120
+EOF
+  chmod +x "$ws/q_backend/.venv/bin/worker"
+
+  leader="$(
+    export Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    source "$ws/research"
+    start_host_process worker "$ws/q_backend/.venv/bin/worker"
+  )"
+  running="$(
+    export Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    source "$ws/research"
+    if is_process_running worker; then echo yes; else echo no; fi
+  )"
+  assert_eq "status recognizes the execed Dramatiq worker" yes "$running"
+
+  second="$(
+    export Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    source "$ws/research"
+    start_host_process worker "$ws/q_backend/.venv/bin/worker"
+  )"
+  assert_eq "repeated start reuses the Dramatiq pool" "$leader" "$second"
+  (
+    export Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    source "$ws/research"
+    stop_host_process "$second" worker
+  ) >/dev/null 2>&1
+  stopped=no
+  kill -0 "$second" 2>/dev/null || stopped=yes
+  assert_eq "down stops the execed Dramatiq worker" yes "$stopped"
+  kill -KILL "-$leader" "-$second" 2>/dev/null || true
+  rm -rf "$ws"
+}
+
+test_process_status_preserves_tracking_files() {
+  local ws preserved
+  ws="$(mktemp -d)"
+  setup_workspace "$ws"
+  preserved="$(
+    export Q_RESEARCH_ROOT="$ws" PATH="$(test_path "$ws")"
+    source "$ws/research"
+    mkdir -p "$RESEARCH_PID_DIR"
+    echo 2147483647 >"$RESEARCH_PID_DIR/api.pid"
+    is_process_running api || true
+    if [[ -f "$RESEARCH_PID_DIR/api.pid" ]]; then echo yes; else echo no; fi
+  )"
+  assert_eq "status preserves tracking for processes it cannot see" yes "$preserved"
+  rm -rf "$ws"
+}
+
 test_host_teardown_kills_the_whole_process_group() {
   local ws leader child alive
   ws="$(mktemp -d)"
@@ -901,6 +958,8 @@ main() {
   test_container_build_caps_build_cache
   test_warm_container_launch_does_not_prune
   test_host_teardown_kills_the_whole_process_group
+  test_dramatiq_worker_tracking_survives_exec
+  test_process_status_preserves_tracking_files
   test_host_mode_starts_the_outbox_relay
   test_container_mode_runs_the_relay_on_the_shared_image
   test_teardown_stops_the_relay
