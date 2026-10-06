@@ -6,6 +6,7 @@ Interactive dev shell commands:
   up live|research|all     Start stacks (research: --host | --container [--rebuild])
   down live|research|all   Stop stacks (default target: all)
   status                   Stack overview
+  gateway                  Start MT5 terminal and data gateway for scripts
   logs <service>           Follow logs until Ctrl+C (returns to prompt)
   restart <service>        Restart a service by alias
   help                     Show this message
@@ -51,6 +52,9 @@ shell_handle_line() {
       ;;
     status)
       shell_run_command status
+      ;;
+    gateway)
+      shell_run_command gateway "${words[@]:1}"
       ;;
     up)
       if [[ ${#words[@]} -lt 2 ]]; then

@@ -35,6 +35,7 @@ resume through the documented workflow once it is restored.
   - `./dev` or `./dev all`: starts both Live and Research stacks and opens both desktop UIs.
   - `./dev live`: starts the full live execution profile and launches `q_terminal`.
   - `./dev research [opts]`: starts Research backend and launches Tauri research desktop UI (`--host` default, `--container`, `--rebuild`).
+  - `./dev gateway`: starts only the MT5 terminal and data gateway for scripts; waits for MT5 connectivity. Default URL: `http://127.0.0.1:18812`.
   - `./dev down [live|research|all]`: selectively stops stacks (default `all`). Stopping live retains the shared MT5 gateway if Research is running and using it.
   - `./dev status`: concise overview of both stacks, APIs, workers, and desktop UIs.
   - `./dev logs <service>`: follows logs by alias (unqualified for live, `research:<svc>` for research).

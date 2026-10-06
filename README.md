@@ -198,6 +198,7 @@ From the workspace root, with Docker running, start the development environment:
 ./dev                  # start both Live and Research stacks and launch both UIs (default)
 ./dev live             # full live execution profile + q_terminal
 ./dev research         # Research backend + UI (--host default | --container)
+./dev gateway          # MT5 terminal and data gateway for Python scripts
 ./dev status           # concise stack overview across both stacks
 ./dev logs api         # follow service logs (aliases: api, outbox, publisher, mt5, ...)
 ./dev logs research:api # follow research service logs (research:api, research:worker, ...)
@@ -226,6 +227,34 @@ dev> exit              # does not stop remaining stacks
 - **Live stack**: Docker Compose (`q-dev` project) provides Postgres (`5434`) and Redis (`6380`); systemd user units supervise the API (`8000`), outbox relay, market-data publisher, execution worker, and MT5 (Wine) services. `q_terminal` reopens the saved target from the active workspace, or defaults to `PETR4` · `1m` on first run.
 - **Research stack**: Docker Compose (`q-research` project) provides isolated Postgres (`5435`) and Redis (`6381`); backend API (`8001`), Dramatiq worker, and relay run with GPU acceleration, pointing the Research UI at port 8001.
 - **Compatibility**: `./research` is a backward-compatible shim that forwards directly to `./dev research "$@"`. Legacy `./dev up [terminal|execution|full]` profile invocations remain supported.
+
+For Python experiments, run `./dev gateway` from the workspace root. It starts
+the installed MT5 terminal and data gateway and waits for terminal connectivity.
+The default gateway URL is `http://127.0.0.1:18812`; an existing Wine/MT5 setup and
+broker login are required. Repeated starts reuse the services. They remain running
+after the command returns, and the existing `./dev down` commands retain their
+shared-service lifecycle rules. Use `./dev logs gateway` for diagnostics.
+
+Set this in your experiment's `.env` file (for example, `q_backend/.env`):
+
+```dotenv
+Q_MT5_GATEWAY_URL=http://127.0.0.1:18812
+```
+
+Install `python-dotenv` in your experiment environment and load the file before
+calling the research library:
+
+```python
+from dotenv import load_dotenv
+from q_backend.research import load_bars
+
+load_dotenv()
+bars = load_bars("WIN$", timeframe="M5", start="2026-09-01")
+```
+
+If gateway authentication is enabled, also configure `Q_MT5_GATEWAY_TOKEN` with
+the gateway's configured token. `load_dotenv()` finds `.env` in the script's
+directory or its parents; pass a path explicitly when your script lives elsewhere.
 
 Research host-worker tracking recognizes the Dramatiq process after the worker entrypoint
 execs Python, so repeated starts reuse the running pool and `down` stops it. Status checks

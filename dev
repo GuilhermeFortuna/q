@@ -8,6 +8,7 @@
 #   ./dev [live|research|all]   # default: all
 #   ./dev live                  # full live execution profile + q_terminal
 #   ./dev research [opts]       # research backend + UI (--host default | --container)
+#   ./dev gateway               # MT5 data gateway for Python scripts
 #   ./dev down [target]         # stop: live | research | all (default: all)
 #   ./dev status                # concise stack overview of both stacks
 #   ./dev logs <service>        # follow logs with aliases (e.g. api, research:api)
@@ -80,6 +81,7 @@ Commands:
   ./dev live              Start the full live execution profile and Qt terminal
   ./dev research [opts]   Start Research backend and UI (--host default | --container)
                           [--rebuild requires container mode]
+  ./dev gateway           Start MT5 terminal and data gateway for scripts
   ./dev down [target]     Stop stacks: live | research | all (default: all)
   ./dev status            Show concise overview of both stacks, APIs, workers, UIs
   ./dev logs <service>    Follow service logs (e.g. api, outbox, research:api, ...)
@@ -375,6 +377,7 @@ seed_env_file() {
 }
 
 ensure_mt5_units() {
+  local include_edge="${1:-1}"
   local unit_dir="${HOME}/.config/systemd/user"
   local gateway_env="$GATEWAY_ENV_FILE"
   local edge_env="${HOME}/.config/mt5-edge/mt5-edge.env"
@@ -383,7 +386,11 @@ ensure_mt5_units() {
 
   mkdir -p "$unit_dir"
 
-  for unit in mt5-terminal.service mt5-gateway.service mt5-edge.service; do
+  local units=(mt5-terminal.service mt5-gateway.service)
+  if [[ "$include_edge" == "1" ]]; then
+    units+=(mt5-edge.service)
+  fi
+  for unit in "${units[@]}"; do
     local src="$systemd_src/$unit"
     local dst="$unit_dir/$unit"
     [[ -f "$src" ]] || die "missing $src"
@@ -394,7 +401,9 @@ ensure_mt5_units() {
   done
 
   seed_env_file "$systemd_src/mt5-gateway.env.example" "$gateway_env"
-  seed_env_file "$systemd_src/mt5-edge.env.example" "$edge_env"
+  if [[ "$include_edge" == "1" ]]; then
+    seed_env_file "$systemd_src/mt5-edge.env.example" "$edge_env"
+  fi
 
   if [[ "$changed" -eq 1 ]]; then
     systemctl --user daemon-reload
@@ -492,6 +501,42 @@ ready_publisher() {
 
 ready_gateway() {
   curl -fsS "$GATEWAY_HEALTH_URL" >/dev/null 2>&1
+}
+
+ready_script_gateway() {
+  local token="${Q_MT5_GATEWAY_TOKEN:-}"
+  if [[ -z "$token" && -f "$GATEWAY_ENV_FILE" ]]; then
+    token="$(sed -n 's/^MT5_GATEWAY_TOKEN=//p' "$GATEWAY_ENV_FILE" | tail -n1)"
+  fi
+  local headers=()
+  if [[ -n "$token" ]]; then
+    headers=(--header "X-Gateway-Token: $token")
+  fi
+  curl -fsS --connect-timeout 2 --max-time 3 "${headers[@]}" "$GATEWAY_HEALTH_URL" 2>/dev/null |
+    python3 -c 'import json,sys
+try:
+    connected = json.load(sys.stdin).get("mt5_connected") is True
+except (ValueError, AttributeError):
+    connected = False
+sys.exit(0 if connected else 1)'
+}
+
+cmd_gateway() {
+  [[ $# -eq 0 ]] || die "usage: ./dev gateway"
+  need wine
+  need winepath
+  need curl
+  need python3
+  ensure_systemd_user
+  ensure_mt5_units 0
+  echo "==> Starting MT5 terminal and data gateway for scripts..."
+  systemctl --user start "$(mt5_unit gateway)"
+  wait_for "MT5 data gateway (terminal connected)" \
+    "./dev logs gateway (check broker login and $GATEWAY_ENV_FILE)" ready_script_gateway || return 1
+  echo "MT5 data gateway: $GATEWAY_URL"
+  echo "Set Q_MT5_GATEWAY_URL=$GATEWAY_URL in your script's .env file."
+  echo "If gateway authentication is enabled, configure Q_MT5_GATEWAY_TOKEN as well."
+  echo "Services remain running. View logs with ./dev logs gateway."
 }
 
 ready_edge() {
@@ -1181,6 +1226,10 @@ dispatch_dev() {
     research)
       shift
       cmd_research "$@"
+      ;;
+    gateway)
+      shift
+      cmd_gateway "$@"
       ;;
     down)
       shift
