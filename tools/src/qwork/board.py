@@ -10,7 +10,9 @@ from functools import cached_property
 from qwork.errors import QworkError
 from qwork.runner import Runner, run
 
-OWNER = "GuilhermeFortuna"
+# `gh project` expects personal project owners to be addressed as the
+# authenticated user (`@me`); passing the login is rejected by current gh.
+OWNER = "@me"
 PROJECT_NUMBER = 2
 
 BLOCKED = "Blocked"
