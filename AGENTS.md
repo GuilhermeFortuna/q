@@ -100,6 +100,9 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
   `./work board set <ID> blocked -m "<what blocks you and what is needed>"`, then stop.
 - Never push, merge, check out `development`/`main`/`staging`, close issues, or change board
   statuses any other way (no `gh project item-edit`, no web UI).
+- A task that changes more than one repository is executed in each of them: create the task
+  branch from `development` in every repository it changes, do the work and checks there, and
+  report all of them in one board message. Launch instructions give the exact commands.
 - Commit on the task branch with focused commits that follow the repository's conventions.
 - Use the `gh` CLI for GitHub operations.
 - Keep task specs and plans lean. Include only checks needed to verify the changed

@@ -23,13 +23,32 @@ meta-repo, not the task's repository.
 
 ## Doing the work
 
-- Work only inside `$workspace/$workdir`, on `$branch`.
+- Work only inside `$workspace/$workdir`, on `$branch`, for the owner repository `$repo`.
+- A task can change more than one repository. The issue, spec and plan name every repository
+  the task changes (for example in an "also changes" note or the plan's global constraints).
+  Every repository the task changes is part of this task, and you must do the work in each of
+  them, not only in `$repo`.
+- For each other repository the task changes, create the same branch from `development` as a
+  worktree, without checking anything out in the main checkout:
+
+      git -C $workspace/<repo> worktree add $workspace/.worktrees/<repo>/$branch -b $branch development
+
+  Use the worktree for all work in that repository. If the branch or worktree already exists,
+  reuse it and review it before continuing. Read that repository's `AGENTS.md` and `README.md`
+  before you change it.
+- Order multi-repository changes so each contract or dependency is ready before its consumers
+  need it. For example, a `q_contracts` change is committed first, then consumers pin its
+  commit in `CONTRACTS_REV` and regenerate their vendored code.
 - Follow the plan task by task. Tick plan checkboxes as you complete steps.
-- Commit locally with focused commits that follow the repository's conventions.
-- Run the repository's documented checks (tests, lint, type checks, `make contracts-check`
-  where relevant) and fix failures caused by your change.
-- Never push, merge, check out `development`, `main` or `staging`, or close the issue.
-- Change the board status only with the commands below.
+- In each repository, commit locally with focused commits that follow that repository's
+  conventions.
+- Run each repository's documented checks (tests, lint, type checks, `make contracts-check`
+  where relevant) and fix failures caused by your change. Report the result for every
+  repository.
+- Never push, merge, check out `development`, `main` or `staging`, or close the issue, in any
+  repository.
+- Change the board status only with the commands below. One status covers the whole task, so
+  the message must name every repository you changed.
 
 ## Finishing
 
