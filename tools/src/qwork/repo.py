@@ -156,8 +156,9 @@ class Git:
             raise QworkError(f"merging {branch} failed and was aborted:\n{exc.detail}") from None
         return self._git("rev-parse", "HEAD").strip()
 
-    def push(self, remote: str, branch: str) -> None:
-        self._git("push", "--quiet", remote, branch)
+    def push(self, remote: str, *refs: str) -> None:
+        """Push `refs` in one command, so the pre-push hook runs once for all of them."""
+        self._git("push", "--quiet", remote, *refs)
 
     def commit_paths(self, paths: list[str], message: str) -> None:
         self._git("add", "--", *paths)
@@ -169,5 +170,5 @@ class Git:
     def tag(self, name: str, message: str) -> None:
         self._git("tag", "--annotate", "-m", message, name)
 
-    def push_tag(self, remote: str, name: str) -> None:
-        self._git("push", "--quiet", remote, f"refs/tags/{name}")
+    def delete_tag(self, name: str) -> None:
+        self._git("tag", "--delete", name)

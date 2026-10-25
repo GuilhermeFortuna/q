@@ -330,19 +330,22 @@ cuts the release, and pushing is implicit because an unpushed tag is one no cons
   **If the merge fails (e.g. a conflict), it is aborted and nothing else happens.** The board
    isn't touched. Resolve it manually, then re-run.
 2. Removes `q/.worktrees/<repo>/<branch>` if it exists.
-3. In a release repository only (steps 3–5):
+3. In a release repository only (steps 3–4):
    sets `version` in `Cargo.toml` and `pyproject.toml` to today's date in `YYYY.M.D` form,
    refreshes `Cargo.lock`, and commits that as `chore(release): bump version to <version>`.
    Nothing is committed when the version is already today's.
-4. Runs `make check`, with its output on your terminal. **If it fails, nothing is tagged or
-   pushed**, the task stays `In Review`, and the merge stays committed locally.
-5. Tags `vYYYY.MM.DD` (annotated, naming the task), suffixed `.2`, `.3`, … when that day
-   already has a release.
-6. Pushes `development`, then the tag, with `--push` or a release. `--no-push` skips both.
-7. Sets the task to `Done`.
-8. Closes the issue with a comment naming the branch, merge commit, and release tag.
+4. Tags `vYYYY.MM.DD` (annotated, naming the task), suffixed `.2`, `.3`, … when that day
+   already has a release. The launcher runs no `make check` of its own: the release is
+   validated by the repository's pre-push hook, which runs the full CI pipeline.
+5. Pushes `development` with `--push` or a release; a release pushes `development` and its
+   tag in one `git push`, so the pre-push CI runs once. **If the push fails (for example the
+   pre-push CI fails), the local tag is deleted, nothing is pushed**, the task stays
+   `In Review`, and the merge stays committed locally. `--no-push` skips the push and leaves
+   the tag local and unvalidated until you push it.
+6. Sets the task to `Done`.
+7. Closes the issue with a comment naming the branch, merge commit, and release tag.
 
-If a later step fails after the merge succeeded (e.g. `make check` fails or the push is
+If a later step fails after the merge succeeded (e.g. the pre-push CI fails or the push is
 rejected), the task stays `In Review`. Fix the cause and re-run `./work finish <ID>`. The merge
 and bump steps are then no-ops, so the retry is safe.
 

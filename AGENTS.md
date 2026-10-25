@@ -25,10 +25,20 @@ resume through the documented workflow once it is restored.
 - Each repository has its own history, CI, `Makefile` and branches (`development`, `main`,
   sometimes `staging`). Run git commands inside the repository or worktree you are
   changing (e.g. `git -C q_backend ...`), never in the `q/` meta-repo itself.
+- Run only the checks, tests and builds needed to verify your change: the tests covering
+  the code you touched, plus format and lint for the affected crate or package. Do not run
+  a repository's full `make check`, `make ci` or complete test suite unless the change is
+  broad enough to need it; the full CI pipeline runs before anything is pushed.
 - Local CI in each child repo automatically enters the host user `ci.slice` (and CI Docker
-  under `ci-docker.slice` when applicable) when those slices exist. Invoke each repo's
-  normal canonical CI command only — do **not** wrap it in `systemd-run`, `ci-run`, or
+  under `ci-docker.slice` when applicable) when those slices exist. When you do run a repo's
+  CI command, invoke it as documented — do **not** wrap it in `systemd-run`, `ci-run`, or
   `--cgroup-parent`. Remote CI is unaffected (slices are absent on hosted runners).
+- Put disk-heavy build output on the NVMe build disk at `/mnt/build`, never on the root
+  disk. Main checkouts already link their Rust `target/` there. In a new worktree, before
+  the first cargo build, create `/mnt/build/targets/<repo>-<branch-slug>` and symlink
+  `target` to it; create Python environments with
+  `UV_PROJECT_ENVIRONMENT=/mnt/build/venvs/<name>`. `/mnt/build` holds only rebuildable
+  data: delete a worktree's target directory and environment when you remove the worktree.
 - `./work` lives at the workspace root. Run it from there, or by its absolute path
   (e.g. `/path/to/q/work`), not from inside a task's repository or worktree.
 - `./dev` is the canonical local development launcher for the Q platform. It supports:
@@ -108,3 +118,5 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
 - Keep task specs and plans lean. Include only checks needed to verify the changed
   behavior; prefer focused mocks for launcher work. Do not require full CI,
   GPU, Wine, Docker, or desktop runs without a concrete task-specific need.
+- Run only the checks your change needs (see the workspace rules above) and report which
+  checks you ran.

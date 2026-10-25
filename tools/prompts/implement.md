@@ -42,9 +42,10 @@ meta-repo, not the task's repository.
 - Follow the plan task by task. Tick plan checkboxes as you complete steps.
 - In each repository, commit locally with focused commits that follow that repository's
   conventions.
-- Run each repository's documented checks (tests, lint, type checks, `make contracts-check`
-  where relevant) and fix failures caused by your change. Report the result for every
-  repository.
+- Run only the checks that verify your change in each repository (the tests covering the
+  code you touched, format and lint for the affected crate or package, `make contracts-check`
+  where relevant), not the full CI suite; the full pipeline runs before anything is pushed.
+  Fix failures caused by your change and report the checks run for every repository.
 - Never push, merge, check out `development`, `main` or `staging`, or close the issue, in any
   repository.
 - Change the board status only with the commands below. One status covers the whole task, so

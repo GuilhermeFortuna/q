@@ -13,6 +13,7 @@ from qwork.errors import QworkError
 from qwork.inspection import check_active, clear_session, load_session, save_session, workspace_lock
 from qwork.release import is_release_repo, release
 from qwork.repo import Git
+from qwork.runner import CommandError
 from qwork.targets import Target, task_targets
 
 
@@ -97,16 +98,27 @@ def _finish(ctx: Context, task_id: str, push: bool, no_push: bool, session: dict
     tags: dict[str, str] = {}
     for t in targets:
         if is_release_repo(t.path):
-            # A rerun after a failed check must not tag the same release twice.
+            # A rerun after a failed push must not tag the same release twice.
             existing = [tag for tag in t.git.tags_at("HEAD") if tag.startswith("v")]
             tags[t.name] = existing[0] if existing else release(ctx, t.git, t.path, task)
 
     pushing = (push or bool(tags)) and not no_push
     if pushing:
         for t in targets:
-            t.git.push("origin", "development")
-            if t.name in tags:
-                t.git.push_tag("origin", tags[t.name])
+            if t.name not in tags:
+                t.git.push("origin", "development")
+                continue
+            tag = tags[t.name]
+            # The pre-push hook validates the release; pushing branch and tag together runs it once.
+            try:
+                t.git.push("origin", "development", f"refs/tags/{tag}")
+            except CommandError as exc:
+                t.git.delete_tag(tag)
+                raise QworkError(
+                    f"pushing release {tag} of {t.name} failed; its pre-push CI may have failed. The merge is "
+                    f"committed locally and the tag was removed. Fix it on development and run "
+                    f"`work finish {task.id}` again.\n{exc.detail}"
+                ) from None
 
     if not completed_on_board:
         ctx.board.set_status(task, DONE)

@@ -6,6 +6,7 @@ import datetime
 
 from helpers import git, item, write
 from qwork.cli import main
+from qwork.runner import CommandError
 
 BRANCH = "Q-029-tick-kernel"
 
@@ -47,23 +48,50 @@ def test_finish_tags_and_pushes_the_release(make_ctx, release_repo):
     assert git(repo, "rev-parse", "origin/development") == git(repo, "rev-parse", "development")
     assert f'version = "{version()}"' in (repo / "Cargo.toml").read_text()
     assert f'version = "{version()}"' in (repo / "pyproject.toml").read_text()
-    assert fake.ran("make", "check") != []
     assert fake.status_edits() == [("PVTI_Q-029", "Done")]
 
 
-def test_failed_check_leaves_task_in_review_without_tag_or_push(make_ctx, release_repo):
+def test_release_skips_make_check_and_pushes_branch_and_tag_together(make_ctx, release_repo):
     ctx, fake, repo = reviewed(make_ctx, release_repo)
-    fake.failures.append(("make", "check"))
-    origin_before = git(repo, "rev-parse", "origin/development").strip()
+    run = ctx.run
+    pushes = []
 
+    def record(args, cwd=None):
+        if args[:2] == ["git", "push"]:
+            pushes.append(args)
+        return run(args, cwd)
+
+    ctx.run = record
+    assert main(["finish", "Q-029"], ctx) == 0
+
+    # The pre-push hook runs the full CI once; the launcher adds no check of its own.
+    assert fake.ran("make") == []
+    assert pushes == [["git", "push", "--quiet", "origin", "development", f"refs/tags/{tag()}"]]
+
+
+def test_failed_push_leaves_task_in_review_and_removes_the_tag(make_ctx, release_repo):
+    ctx, fake, repo = reviewed(make_ctx, release_repo)
+    origin_before = git(repo, "rev-parse", "origin/development").strip()
+    run = ctx.run
+
+    def reject(args, cwd=None):
+        if args[:2] == ["git", "push"]:
+            raise CommandError(args, 1, "pre-push hook failed")
+        return run(args, cwd)
+
+    ctx.run = reject
     assert main(["finish", "Q-029"], ctx) == 1
 
-    assert "`make check` failed" in ctx.err.getvalue()
+    assert f"pushing release {tag()} of q_core failed" in ctx.err.getvalue()
     assert git(repo, "tag", "--list").strip() == ""
     git(repo, "fetch", "--quiet", "origin")
     assert git(repo, "rev-parse", "origin/development").strip() == origin_before
     assert fake.status_edits() == []
     assert fake.gh("gh", "issue", "close") == []
+
+    ctx.run = run
+    assert main(["finish", "Q-029"], ctx) == 0
+    assert git(repo, "ls-remote", "--tags", "origin", tag()).strip() != ""
 
 
 def test_second_release_on_the_same_day_is_suffixed(make_ctx, release_repo):

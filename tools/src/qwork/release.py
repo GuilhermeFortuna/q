@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 
 from qwork.context import Context
-from qwork.errors import QworkError
 from qwork.repo import Git
 from qwork.runner import CommandError
 
@@ -56,7 +55,11 @@ def set_versions(repo: Path, version: str) -> list[str]:
 
 
 def release(ctx: Context, git: Git, repo: Path, task, day: datetime.date | None = None) -> str:
-    """Bump, validate, and tag `development`. Returns the tag; raises if checks fail."""
+    """Bump and tag `development`, returning the tag.
+
+    The release is validated when it is pushed: the repository's pre-push hook runs its full CI
+    pipeline, so running `make check` here would repeat that run.
+    """
     day = day or datetime.date.today()
     version = release_version(day)
 
@@ -69,15 +72,6 @@ def release(ctx: Context, git: Git, repo: Path, task, day: datetime.date | None 
             pass
         if git.is_dirty():
             git.commit_paths(["Cargo.lock"], f"chore(release): refresh Cargo.lock for {version}")
-
-    print(f"{task.id}: running `make check` in {task.repo} before tagging", file=ctx.err)
-    try:
-        ctx.stream(["make", "check"], cwd=repo)
-    except CommandError as exc:
-        raise QworkError(
-            f"`make check` failed in {task.repo} ({exc.returncode}); the merge is committed locally but "
-            f"nothing was tagged or pushed. Fix it on development and run `work finish {task.id}` again."
-        ) from None
 
     tag = tag_name(day, set(git.tags()))
     git.tag(tag, f"{task.id}: {task.title}")
