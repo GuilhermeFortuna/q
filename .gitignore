@@ -3,6 +3,7 @@
 /q_core/
 /q_frontend/
 /q_terminal/
+/q_strategies/
 /.worktrees/
 /q-workspace/.serena/cache/
 /q-workspace/.serena/logs/

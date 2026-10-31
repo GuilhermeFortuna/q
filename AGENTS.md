@@ -21,7 +21,11 @@ resume through the documented workflow once it is restored.
 | `q_core/` | Rust workspace of shared deterministic primitives, bound to Python (PyO3) and Qt (cxx-qt) |
 | `q_frontend/` | Tauri 2 + React 19 research desktop UI |
 | `q_terminal/` | Qt 6 / QML live trading and operations terminal |
+| `q_strategies/` | Private research strategies: one self-contained `ResearchStrategy` module per strategy |
 
+- `q_strategies` is the one private repository. The author's trading strategies, and ports of
+  them, live there and never in the public repositories. It has a single `main` branch, no CI
+  and no board tasks; read its `README.md` before changing it.
 - Each repository has its own history, CI, `Makefile` and branches (`development`, `main`,
   sometimes `staging`). Run git commands inside the repository or worktree you are
   changing (e.g. `git -C q_backend ...`), never in the `q/` meta-repo itself.
