@@ -11,6 +11,7 @@ up to date, and merges the finished work into `development` once you approve it.
 - `[work board set](#work-board-set)` — status updates (used by agents)
 - [work inspect](#work-inspect) — select reviewed task branches, or restore checkouts
 - `[work finish](#work-finish)` — merge a reviewed task and mark it Done
+- `[work models](#work-models)` — research the model profiles planning agents rely on
 - [Agents, effort and models](#agents-effort-and-models)
 - [Branch mode vs worktree mode](#branch-mode-vs-worktree-mode)
 - [What the agent is told](#what-the-agent-is-told)
@@ -358,18 +359,39 @@ and bump steps are then no-ops, so the retry is safe.
 
 
 
+## `work models`
+
+Launches an agent to research the capability profiles in [`docs/models.md`](models.md). Planning
+agents use those profiles to suggest models for each new task. Nothing runs automatically.
+
+```
+./work models {document,refresh} --agent AGENT [--effort EFFORT] [--model MODEL] [--dry-run]
+```
+
+| Action     | Researches                                   | When to run it                        |
+| ---------- | -------------------------------------------- | ------------------------------------- |
+| `document` | Roster models that do not have a profile yet | After adding models to the roster     |
+| `refresh`  | Every roster model, re-rated together        | When you want the information updated |
+
+The agent edits only the file's `Profiles` section and leaves the change uncommitted for your
+review. It needs web access to research models. The prompt template lives at
+[`tools/prompts/models.md`](../tools/prompts/models.md).
+
+---
+
 ## Agents, effort and models
 
 
 | `--agent`     | Launches                   | `--effort` values                       | How effort is passed                          | `--model`   |
 | ------------- | -------------------------- | --------------------------------------- | --------------------------------------------- | ----------- |
 | `claude`      | Claude Code (`claude`)     | `low` `medium` `high` `xhigh` `max`     | `--effort E`                                  | `--model M` |
-| `codex`       | Codex CLI (`codex`)        | `minimal` `low` `medium` `high` `xhigh` | `-c model_reasoning_effort=E`                 | `-m M`      |
+| `codex`       | Codex CLI (`codex`)        | `low` `medium` `high` `xhigh` `max` `ultra` | `-c model_reasoning_effort=E`                 | `-m M`      |
 | `cursor`      | Cursor CLI (`agent`)       | `low` `medium` `high` `xhigh` `max`     | as a model parameter: `--model 'M[effort=E]'` | `--model M` |
-| `antigravity` | Antigravity CLI (`agy -i`) | `low` `medium` `high`                   | `--effort E`                                  | `--model M` |
+| `antigravity` | Antigravity CLI (`agy -i`) | `low` `medium` `high` `xhigh` `max`     | `--effort E`                                  | `--model M` |
 
 
-- An `--effort` value the agent doesn't accept is an error, e.g. `--agent antigravity --effort xhigh`.
+- An `--effort` value the agent doesn't accept is an error, e.g. `--agent antigravity --effort ultra`. The
+  list is per agent, so a model can still refuse a level: Codex's Luna models stop at `max`.
 - **Codex** defaults to `gpt-5.6-terra` when `--model` is omitted; pass `--model` to override it.
   The other agents fall back to whatever their own CLI is configured to use.
 - **Cursor** can only apply effort through a model. `--agent cursor --effort high` without
@@ -427,7 +449,7 @@ Every error is one line starting with `work:` and the command exits with status 
 | `Q-010 is 'Todo' but branch Q-010-… already exists in q_backend; delete or rename it first` | A leftover branch from an earlier attempt. Delete/rename it, or set the task to `In Progress` in GitHub to resume on it. |
 | `q_backend has uncommitted changes; commit or stash them, or use --worktree`                | Clean the checkout, or run with `--worktree`                                                                             |
 | `agent 'cursor' needs 'agent' on PATH`                                                      | Install the agent CLI or fix `PATH`                                                                                      |
-| `antigravity does not support effort 'xhigh' (allowed: low, medium, high)`                  | Pick a value from the [table](#agents-effort-and-models)                                                                 |
+| `antigravity does not support effort 'ultra' (allowed: low, medium, high, xhigh, max)`      | Pick a value from the [table](#agents-effort-and-models)                                                                 |
 | `cursor applies effort through the model; pass --model with --effort`                       | Add `--model`, or drop `--effort`                                                                                        |
 | `board Status has no 'In Review' option; add it in the GitHub project settings`             | Add the option in the GitHub UI (Project → Settings → Status)                                                            |
 | `no spec matching …` / `2 plan files match …`                                               | The task needs exactly one spec and one plan file with the `<ID>-` prefix                                                |

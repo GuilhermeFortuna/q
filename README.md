@@ -154,6 +154,8 @@ Agents are launched from the workspace root with `./work` (requires `uv` and an 
 ./work start Q-010 --agent cursor --model sonnet-5 --effort high
 ./work start Q-010 --agent antigravity --dry-run  # print the prompt, change nothing
 ./work board show Q-010
+./work models document --agent claude          # research newly added models in docs/models.md
+./work models refresh --agent claude           # research every listed model again
 ./work inspect Q-010                           # select all involved task branches for local review
 ./dev research                                # run the selected code (or ./dev live / ./dev)
 ./work inspect --restore                      # return to previous checkouts if postponing the merge

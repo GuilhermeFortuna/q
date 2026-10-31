@@ -56,7 +56,7 @@ def test_antigravity_interactive_prompt():
     ]
 
 
-@pytest.mark.parametrize(("agent", "effort"), [("antigravity", "xhigh"), ("codex", "max"), ("claude", "minimal")])
+@pytest.mark.parametrize(("agent", "effort"), [("antigravity", "ultra"), ("codex", "minimal"), ("claude", "ultra")])
 def test_unsupported_effort_is_an_error(agent, effort):
     with pytest.raises(QworkError, match=f"{agent} does not support effort '{effort}'"):
         build_command(agent, "P", effort, None)

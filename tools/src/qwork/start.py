@@ -29,7 +29,7 @@ def _warn_if_behind(ctx: Context, git: Git) -> None:
         print(f"work: warning: local development is {behind} commit(s) behind origin/development", file=ctx.err)
 
 
-def _launch_env(env: Mapping[str, str]) -> dict[str, str]:
+def launch_env(env: Mapping[str, str]) -> dict[str, str]:
     """A copy of `env` safe to launch an agent with: no qwork venv or workspace marker."""
     clean = dict(env)
     venv = clean.pop("VIRTUAL_ENV", None)
@@ -194,7 +194,7 @@ def start(
 
     print(f"work: {task.id} on {task.branch} in {rel(workdir)}; launching {agent}", file=ctx.err)
     os.chdir(ctx.workspace)
-    env = build_env(_launch_env(os.environ))
+    env = build_env(launch_env(os.environ))
     try:
         ctx.execvp(argv[0], argv, env)
     except OSError as exc:

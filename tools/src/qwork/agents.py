@@ -19,9 +19,9 @@ class AgentSpec:
 
 AGENTS = {
     "claude": AgentSpec("claude", "claude", ("low", "medium", "high", "xhigh", "max")),
-    "codex": AgentSpec("codex", "codex", ("minimal", "low", "medium", "high", "xhigh"), "gpt-5.6-terra"),
+    "codex": AgentSpec("codex", "codex", ("low", "medium", "high", "xhigh", "max", "ultra"), "gpt-5.6-terra"),
     "cursor": AgentSpec("cursor", "agent", ("low", "medium", "high", "xhigh", "max")),
-    "antigravity": AgentSpec("antigravity", "agy", ("low", "medium", "high")),
+    "antigravity": AgentSpec("antigravity", "agy", ("low", "medium", "high", "xhigh", "max")),
 }
 
 

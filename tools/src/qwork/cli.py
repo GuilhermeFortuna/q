@@ -40,6 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-push", action="store_true", help="in a release repo, tag locally without pushing anything"
     )
 
+    models = sub.add_parser("models", help="research the model profiles in docs/models.md with an agent")
+    models.add_argument(
+        "action", choices=("document", "refresh"), help="document: models without a profile; refresh: every model"
+    )
+    models.add_argument("--agent", required=True, choices=list(AGENTS))
+    models.add_argument("--effort", help=f"reasoning effort (default: {DEFAULT_EFFORT})")
+    models.add_argument("--model", help=f"model passed to the agent (defaults: {_default_models()})")
+    models.add_argument("--dry-run", action="store_true", help="print the prompt without launching the agent")
+
     board = sub.add_parser("board", help="inspect or update a task on the project board")
     board_sub = board.add_subparsers(dest="board_command", required=True)
     show = board_sub.add_parser("show", help="show a task")
@@ -67,6 +76,10 @@ def main(argv: list[str] | None = None, ctx: Context | None = None) -> int:
             from qwork.finish import finish
 
             return finish(ctx, args.task_id, args.push, args.no_push)
+        if args.command == "models":
+            from qwork.models import models
+
+            return models(ctx, args.action, args.agent, args.effort, args.model, args.dry_run)
         from qwork.commands import board_set, board_show
 
         if args.board_command == "show":

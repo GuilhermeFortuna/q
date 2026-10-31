@@ -106,6 +106,26 @@ plan live in that repository at `docs/development/specs/Q-NNN-*-spec.md` and
 | `In Review` | Work committed on a local task branch, checks run, awaiting human review | agent |
 | `Done` | Merged into `development`, and in a repository with a `RELEASING.md` (`q_core`) released as a pushed `vYYYY.MM.DD` tag (suffixed `.2`, `.3`, … for a second release the same day) | `./work finish` (human) |
 
+### Authoring tasks
+
+Every new task carries a model suggestion, so the human can match model cost to difficulty.
+Read [`docs/models.md`](docs/models.md) and use its profiles; do not research models while
+planning. Add this section to the task's plan, and repeat it in the issue body:
+
+```markdown
+## Suggested models
+
+**Difficulty:** `D2 standard` — <one line on what makes it that hard>
+
+| Model | Effort | Why |
+|---|---|---|
+| `<agent> / <model>` | `<effort>` | <why it fits this task> |
+```
+
+List every roster model whose maximum difficulty covers the task, cheapest first, so the first
+row is the default choice. Only profiled models are eligible. If none qualifies or the roster
+has no profiles, say so in the section and tell the human to run `./work models document`.
+
 ### Rules for agents
 
 - Work only on the task you were launched for. If asked to implement a board task that is not
