@@ -86,6 +86,8 @@ cat >"$WS/q_backend/.venv/bin/q-replay" <<'FAKE'
 #!/usr/bin/env bash
 echo "q-replay $*" >>"$Q_TEST_CALLS"
 if [[ "$*" == *"from q_core"* && -f "$Q_TEST_STATE/core_fails" ]]; then exit 1; fi
+if [[ "$*" == *"create"* ]]; then echo "q-replay-token ${Q_REPLAY_TOKEN:-unset}" >>"$Q_TEST_CALLS"; fi
+if [[ "$*" == *"create"* && -f "$Q_TEST_STATE/create_fails" ]]; then echo "run rejected" >&2; exit 1; fi
 if [[ "$1" == "prepare" && -f "$Q_TEST_STATE/prepare_fails" ]]; then
   echo "checksum mismatch" >&2
   exit 2
@@ -117,7 +119,7 @@ run_dev() {
 }
 
 reset_state() {
-  rm -rf "$STATE/replay_active" "$STATE/prepare_fails" "$STATE/ports" "$STATE/infra" "$STATE/replay-state" "$STATE/consumer_active" "$STATE/replaced_generation" "$STATE/core_fails"
+  rm -rf "$STATE/replay_active" "$STATE/prepare_fails" "$STATE/create_fails" "$STATE/ports" "$STATE/infra" "$STATE/replay-state" "$STATE/consumer_active" "$STATE/replaced_generation" "$STATE/core_fails"
   mkdir -p "$STATE/ports"
 }
 
@@ -286,5 +288,72 @@ reset_state
 run_dev shell <"$TMP/input"
 assert_contains "shell starts replay" "q-replay-api.service" "$CALLS"
 assert_contains "shell stops replay" "systemctl --user stop q-replay" "$CALLS"
+# 9. Replay run state file (Q-146): ready after a launch, idle after shutdown, failed after a failed
+# launch, mode 0600, one admin token per run that matches the simulator environment.
+STATE_FILE="$STATE/replay-state/current.json"
+state_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$STATE_FILE" "$1"; }
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ "$(state_field phase)" == ready ]] && ok "state file reports ready" || bad "state file phase: $(state_field phase)"
+[[ "$(state_field generation)" == gen-test ]] && ok "state file names the generation" || bad "generation missing"
+[[ "$(state_field admin_url)" == http://127.0.0.1:18914 ]] && ok "state file names the admin URL" || bad "admin URL missing"
+TOKEN_1="$(state_field admin_token)"
+[[ -n "$TOKEN_1" ]] && ok "state file carries the per-run admin token" || bad "admin token missing"
+[[ "$(stat -c %a "$STATE_FILE")" == 600 ]] && ok "state file is mode 0600" || bad "state file mode $(stat -c %a "$STATE_FILE")"
+assert_contains "simulator environment receives the same token" "Q_REPLAY_TOKEN=$TOKEN_1" "$(cat "$ENVF")"
+assert_contains "create call carries the run token" "q-replay-token $TOKEN_1" "$CALLS"
+
+run_dev down replay
+[[ "$(state_field phase)" == idle ]] && ok "shutdown publishes idle" || bad "shutdown phase: $(state_field phase)"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+TOKEN_2="$(state_field admin_token)"
+[[ -n "$TOKEN_2" && "$TOKEN_2" != "$TOKEN_1" ]] && ok "each run gets a fresh token" || bad "token reused across runs"
+
+run_dev down replay
+reset_state
+touch "$STATE/create_fails"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -ne 0 ]] && assert_contains "failed create reports the launcher reason" "replay run creation failed" "$OUT" \
+  || bad "failed create should fail the launch"
+[[ "$(state_field phase)" == failed ]] && ok "failed launch publishes failed, not starting" || bad "failed phase: $(state_field phase)"
+assert_not_contains "failed launch publishes no token" "admin_token" "$(cat "$STATE_FILE")"
+
+# A refused second start leaves the running stack's state untouched.
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset" --no-terminal
+[[ "$(state_field phase)" == ready ]] && ok "a reused run stays ready" || bad "reused run phase: $(state_field phase)"
+
+# 10. --no-terminal starts the stack without q_terminal; replay terminal opens it on a running stack.
+run_dev down replay
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset" --no-terminal
+[[ $RC -eq 0 ]] && ok "no-terminal launch succeeds" || bad "no-terminal launch failed: $OUT"
+assert_not_contains "no-terminal starts no terminal unit" "systemctl --user start q-replay-terminal.service" "$CALLS"
+assert_contains "no-terminal still starts the API" "systemctl --user start q-replay-api.service" "$CALLS"
+
+run_dev down replay
+reset_state
+run_dev replay terminal
+[[ $RC -ne 0 ]] && assert_contains "terminal refused without a running stack" "not running" "$OUT" \
+  || bad "terminal opened without a running stack"
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset" --no-terminal
+run_dev replay terminal
+[[ $RC -eq 0 ]] && assert_contains "replay terminal starts the terminal unit" "systemctl --user start q-replay-terminal.service" "$CALLS" \
+  || bad "replay terminal failed: $OUT"
+run_dev replay terminal extra
+[[ $RC -ne 0 ]] && ok "replay terminal takes no options" || bad "replay terminal accepted an option"
+run_dev down replay
+
+# 11. Host-mode Research exports the replay run manager settings (container mode never calls this).
+EXPORTS="$(env -i PATH="/usr/bin:/bin" bash -c '
+  set -e
+  ROOT="'"$WS"'"; STATE_DIR="'"$STATE"'/dev-state"
+  source "'"$WS"'/tools/dev/research.sh"
+  export_host_backend_env
+  printf "%s|%s|%s" "$Q_REPLAY_CONTROL_ENABLED" "$Q_REPLAY_LAUNCHER" "$Q_REPLAY_STATE_DIR"' 2>&1)"
+assert_contains "host research enables replay control" "1|$WS/dev|$STATE/dev-state/replay" "$EXPORTS"
+
 echo "passed: $PASS failed: $FAIL"
 [[ $FAIL -eq 0 ]]

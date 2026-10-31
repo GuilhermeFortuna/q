@@ -279,19 +279,39 @@ and `18914` (external controls). `Q_REPLAY_PG_PORT`, `Q_REPLAY_REDIS_PORT`,
 Unset caller `Q_MT5_GATEWAY_URL` and `Q_MT5_EDGE_URL` values that point at the normal stack.
 
 Runs start **paused**. Configure a demo deployment through the ordinary terminal flow, then
-resume from another shell using the command printed by the launcher:
+resume from another shell. The admin listener requires a per-run token, which the launcher
+keeps in `<state>/replay/current.json` (mode `0600`) with the phase, run directory, generation
+and admin URL. Export it for `q-replay` calls:
 
 ```bash
+export Q_REPLAY_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["admin_token"])' \
+  "${XDG_STATE_HOME:-$HOME/.local/state}/q-dev/replay/current.json")"
 q_backend/.venv/bin/q-replay --url http://127.0.0.1:18914 resume
 ./dev logs replay:execution
 ./dev restart replay:publisher
 ./dev down replay
 ```
 
+`current.json` moves through `starting`, `ready`, `idle` (after `down replay`) and `failed`
+(a launch that stopped part way). The Research API reads it to show the replay page.
+`--no-terminal` starts the whole stack without opening q_terminal, and `./dev replay terminal`
+opens q_terminal on a running stack:
+
+```bash
+./dev replay --config run.json --root <dataset-dir> --no-terminal
+./dev replay terminal
+```
+
+In host-mode Research (`./dev research` or `./dev`), the `/replay` page drives this launcher through
+the Research API: it freezes TickStore ranges, starts runs with `--no-terminal`, and forwards
+commands to the admin listener. Only the host-mode Research API receives
+`Q_REPLAY_CONTROL_ENABLED`, `Q_REPLAY_LAUNCHER` and `Q_REPLAY_STATE_DIR`; the container
+Research stack and the live API never serve replay routes.
+
 Replay aliases are `replay:simulator`, `replay:postgres`, `replay:redis`, `replay:api`,
 `replay:execution`, `replay:publisher`, `replay:outbox`, and `replay:terminal`; they appear in
 `./dev status` and work with `logs` and `restart`. The interactive shell accepts
-`replay --config <path> [--root <dir>]` or `up replay --config <path> [--root <dir>]`.
+`replay --config <path> [--root <dir>] [--no-terminal]` or `up replay --config <path> [--root <dir>]`; `replay terminal` opens q_terminal.
 Closing the terminal or exiting the shell leaves the stack running. `down replay` stops
 only replay; `down all` includes it.
 
