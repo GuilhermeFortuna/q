@@ -304,6 +304,8 @@ cmd_replay() {
   replay_write_env "$run_dir" "$root"
   replay_install_units "$run_dir"
   systemctl --user daemon-reload
+  # A simulator that crashed earlier can sit in start-limit-hit; clear that so this start is attempted.
+  systemctl --user reset-failed "$REPLAY_UNIT" 2>/dev/null || true
   systemctl --user start "$REPLAY_UNIT"
   wait_for "replay simulator" "journalctl --user -u $REPLAY_UNIT -n 30 --no-pager" replay_ready
   Q_REPLAY_TOKEN="$REPLAY_TOKEN" "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" create --config "$run_dir/config.json" \

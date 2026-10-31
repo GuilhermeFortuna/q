@@ -159,6 +159,7 @@ reset_state
 run_dev replay --config "$CONFIG" --root "$TMP/dataset"
 [[ $RC -eq 0 ]] && ok "replay launch succeeds" || bad "replay launch failed: $OUT"
 assert_contains "the replay unit is started" "systemctl --user start q-replay.service" "$CALLS"
+assert_contains "a previously failed simulator is reset before start" "systemctl --user reset-failed q-replay.service" "$CALLS"
 assert_contains "database is migrated" "migration -c" "$CALLS"
 assert_contains "the run is created through the admin API" "q-replay --url http://127.0.0.1:18914 create" "$CALLS"
 assert_contains "output names the external resume" "Resume after deployment setup" "$OUT"
