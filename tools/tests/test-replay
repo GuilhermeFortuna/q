@@ -49,6 +49,7 @@ echo "systemctl $*" >>"$Q_TEST_CALLS"
 case "$*" in
   "--user status") exit 0 ;;
   "--user start q-replay.service"|"--user restart q-replay.service") touch "$Q_TEST_STATE/replay_active" ;;
+  "--user stop q-replay-api.service") exit 1 ;;
   "--user stop "*"q-replay.service") rm -f "$Q_TEST_STATE/replay_active" ;;
   "--user is-active --quiet q-replay.service") [[ -f "$Q_TEST_STATE/replay_active" ]] ;;
   "--user is-active --quiet q-replay-"*) [[ -f "$Q_TEST_STATE/consumer_active" ]] ;;
@@ -209,6 +210,25 @@ reset_state
 touch "$STATE/consumer_active"
 run_dev replay --config "$CONFIG"
 [[ $RC -ne 0 ]] && ok "orphaned consumers prevent new generation" || bad "orphaned consumers accepted"
+
+# 5b. A unit that refuses to stop does not keep the simulator running (Q-146 regression).
+reset_state
+touch "$STATE/replay_active"
+run_dev down replay
+[[ $RC -eq 0 ]] && ok "down replay succeeds when one unit refuses to stop" || bad "down failed: $OUT"
+[[ ! -f "$STATE/replay_active" ]] && ok "the simulator stops even when another unit refuses" \
+  || bad "the simulator kept running after down"
+assert_contains "down reports the stopped phase" "Replay stack stopped" "$OUT"
+
+# 5c. A run marked as running with no published token is refused with its reason, not a traceback.
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset" --no-terminal
+rm -f "$STATE/replay-state/current.json"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset" --no-terminal
+[[ $RC -ne 0 ]] && assert_contains "unpublished running simulator is refused with its reason" "no run is published" "$OUT" \
+  || bad "an unpublished running simulator was accepted"
+assert_not_contains "no traceback reaches the operator" "KeyError" "$OUT"
+run_dev down replay
 
 # 6. Scoped stop: replay only; live and research are untouched.
 reset_state

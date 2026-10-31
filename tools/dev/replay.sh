@@ -264,10 +264,14 @@ cmd_replay() {
   if replay_unit_active; then
     [[ -f "$REPLAY_STATE_DIR/fingerprint" && "$(cat "$REPLAY_STATE_DIR/fingerprint")" == "$fingerprint" ]] \
       || die "a different replay generation is already running; stop it with ./dev down replay first"
-    local generation
+    local generation status_json
     REPLAY_TOKEN="$(replay_current_token)"
-    generation="$(Q_REPLAY_TOKEN="$REPLAY_TOKEN" "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" status \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')"
+    [[ -n "$REPLAY_TOKEN" ]] \
+      || die "the replay simulator is running but no run is published; stop it with ./dev down replay first"
+    status_json="$(Q_REPLAY_TOKEN="$REPLAY_TOKEN" "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" status)" \
+      || die "the running replay simulator did not report its run; stop it with ./dev down replay first"
+    generation="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("generation", ""))')"
+    [[ -n "$generation" ]] || die "the running replay simulator reported no generation; stop it with ./dev down replay first"
     [[ -f "$REPLAY_STATE_DIR/generation" && "$generation" == "$(cat "$REPLAY_STATE_DIR/generation")" ]] \
       || die "replay generation replaced; stop all replay services before starting again"
     replay_publish_state ready "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run_dir",""))' "$REPLAY_STATE_FILE" 2>/dev/null || true)" "$generation" "$REPLAY_TOKEN"
@@ -341,8 +345,15 @@ PY
 cmd_down_replay() {
   replay_lock
   if systemd_available; then
-    systemctl --user stop "$(replay_unit terminal)" "$(replay_unit execution)" "$(replay_unit publisher)" \
-      "$(replay_unit outbox)" "$(replay_unit api)" "$REPLAY_UNIT" 2>/dev/null || true
+    # Each unit is stopped on its own: one unit with a bad setting must not keep the others running.
+    local unit
+    for unit in "$(replay_unit terminal)" "$(replay_unit execution)" "$(replay_unit publisher)" \
+      "$(replay_unit outbox)" "$(replay_unit api)" "$REPLAY_UNIT"; do
+      systemctl --user stop "$unit" 2>/dev/null || true
+    done
+    if replay_unit_active; then
+      die "$REPLAY_UNIT is still running; stop it with systemctl --user stop $REPLAY_UNIT and run ./dev down replay again"
+    fi
   fi
   if [[ -f "$REPLAY_STATE_DIR/compose.env" ]] && command -v docker >/dev/null 2>&1; then replay_compose down; fi
   replay_publish_state idle
