@@ -4,8 +4,9 @@ shell_help() {
   cat <<'EOF'
 Interactive dev shell commands:
   up live|research|all     Start stacks (research: --host | --container [--rebuild])
-  down live|research|all   Stop stacks (default target: all)
+  down live|research|replay|all   Stop stacks (default target: all)
   status                   Stack overview
+  replay --config <path>   Start replay (also: up replay --config <path>)
   gateway                  Start MT5 terminal and data gateway for scripts
   logs <service>           Follow logs until Ctrl+C (returns to prompt)
   restart <service>        Restart a service by alias
@@ -53,6 +54,9 @@ shell_handle_line() {
     status)
       shell_run_command status
       ;;
+    replay)
+      shell_run_command replay "${words[@]:1}"
+      ;;
     gateway)
       shell_run_command gateway "${words[@]:1}"
       ;;
@@ -67,6 +71,9 @@ shell_handle_line() {
           ;;
         all)
           shell_run_command all
+          ;;
+        replay)
+          shell_run_command replay "${words[@]:2}"
           ;;
         research)
           shell_run_command research "${words[@]:2}"

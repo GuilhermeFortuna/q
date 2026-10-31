@@ -71,6 +71,7 @@ setup_workspace() {
   cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
   chmod +x "$ws/tools/dev/research.sh"
   cp "$ROOT/tools/dev/shell.sh" "$ws/tools/dev/shell.sh"
+  cp "$ROOT/tools/dev/replay.sh" "$ws/tools/dev/replay.sh"
   cp "$ROOT/dev" "$ws/dev"
   chmod +x "$ws/dev"
   cp "$RESEARCH_SRC" "$ws/research"
