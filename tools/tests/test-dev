@@ -75,6 +75,7 @@ setup_workspace() {
   cp "$ROOT/tools/dev/research.sh" "$ws/tools/dev/research.sh"
   chmod +x "$ws/tools/dev/research.sh"
   cp "$ROOT/tools/dev/shell.sh" "$ws/tools/dev/shell.sh"
+  cp "$ROOT/tools/dev/replay.sh" "$ws/tools/dev/replay.sh"
   if [[ -f "$ROOT/tools/research-gateway-compose.yml" ]]; then
     cp "$ROOT/tools/research-gateway-compose.yml" "$ws/tools/research-gateway-compose.yml"
   fi

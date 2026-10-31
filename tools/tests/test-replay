@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Regression harness for ./dev replay (Q-145). Uses fake systemctl, curl, journalctl and q-replay
+# on PATH: no Docker, Wine, MT5, GPU or network is needed, and none of those commands may run.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PASS=0
+FAIL=0
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+ok() { PASS=$((PASS + 1)); echo "ok: $1"; }
+bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1" >&2; }
+
+assert_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then ok "$label"; else bad "$label (missing '$needle')"; fi
+}
+assert_not_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then ok "$label"; else bad "$label (unexpected '$needle')"; fi
+}
+
+WS="$TMP/ws"
+BIN="$TMP/bin"
+LOG="$TMP/calls.log"
+STATE="$TMP/state"
+mkdir -p "$WS/tools/dev" "$WS/tools/tests" "$WS/q_backend/.venv/bin" "$WS/q_backend/deploy/systemd/replay" \
+  "$BIN" "$STATE/ports" "$TMP/home" "$TMP/dataset" "$TMP/config-dir"
+cp "$ROOT/dev" "$WS/dev"
+cp "$ROOT/tools/dev/shell.sh" "$ROOT/tools/dev/replay.sh" "$ROOT/tools/dev/research.sh" "$WS/tools/dev/"
+cp "$ROOT/tools/tests/test-replay" "$WS/tools/tests/"
+# The unit template belongs to the q_backend repository: a workspace checkout provides it, or
+# Q_TEST_TEMPLATE points at it (task worktrees keep q_backend outside the meta-repo).
+TEMPLATE_SRC="${Q_TEST_TEMPLATE:-$ROOT/q_backend/deploy/systemd/replay/q-replay.service.in}"
+[[ -f "$TEMPLATE_SRC" ]] || { echo "FAIL: unit template not found: $TEMPLATE_SRC (set Q_TEST_TEMPLATE)" >&2; exit 1; }
+cp "$TEMPLATE_SRC" "$WS/q_backend/deploy/systemd/replay/q-replay.service.in"
+chmod +x "$WS/dev"
+CONFIG="$TMP/config-dir/run.json"
+echo '{}' >"$CONFIG"
+
+# Fake systemctl: records the call; `is-active` follows the state file.
+cat >"$BIN/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$Q_TEST_CALLS"
+case "$*" in
+  "--user status") exit 0 ;;
+  "--user start q-replay.service"|"--user restart q-replay.service") touch "$Q_TEST_STATE/replay_active" ;;
+  "--user stop q-replay.service") rm -f "$Q_TEST_STATE/replay_active" ;;
+  "--user is-active --quiet q-replay.service") [[ -f "$Q_TEST_STATE/replay_active" ]] ;;
+  *) exit 0 ;;
+esac
+FAKE
+# Fake curl: the admin answer depends on whether the simulator "started".
+cat >"$BIN/curl" <<'FAKE'
+#!/usr/bin/env bash
+echo "curl $*" >>"$Q_TEST_CALLS"
+if [[ -f "$Q_TEST_STATE/replay_active" ]]; then echo -n 200; else echo -n 000; fi
+FAKE
+cat >"$BIN/journalctl" <<'FAKE'
+#!/usr/bin/env bash
+echo "journalctl $*" >>"$Q_TEST_CALLS"
+FAKE
+for tool in docker wine python3-mt5; do
+  cat >"$BIN/$tool" <<FAKE
+#!/usr/bin/env bash
+echo "FORBIDDEN $tool \$*" >>"\$Q_TEST_CALLS"
+exit 99
+FAKE
+done
+# Fake q-replay: `prepare` may be made to fail; the other verbs record their arguments.
+cat >"$WS/q_backend/.venv/bin/q-replay" <<'FAKE'
+#!/usr/bin/env bash
+echo "q-replay $*" >>"$Q_TEST_CALLS"
+if [[ "$1" == "prepare" && -f "$Q_TEST_STATE/prepare_fails" ]]; then
+  echo "checksum mismatch" >&2
+  exit 2
+fi
+exit 0
+FAKE
+chmod +x "$BIN"/* "$WS/q_backend/.venv/bin/q-replay"
+
+run_dev() {
+  : >"$LOG"
+  set +e
+  OUT="$(env -i PATH="$BIN:/usr/bin:/bin" HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" \
+    Q_TEST_CALLS="$LOG" Q_TEST_STATE="$STATE" Q_REPLAY_STATE_DIR="$STATE/replay-state" \
+    Q_REPLAY_BIN="$WS/q_backend/.venv/bin/q-replay" Q_DEV_WAIT_ATTEMPTS=2 Q_DEV_WAIT_INTERVAL=0 \
+    bash "$WS/dev" "$@" 2>&1)"
+  RC=$?
+  set -e
+  CALLS="$(cat "$LOG")"
+}
+
+reset_state() {
+  rm -rf "$STATE/replay_active" "$STATE/prepare_fails" "$STATE/ports"
+  mkdir -p "$STATE/ports"
+}
+
+# 1. Launcher syntax and argument validation.
+bash -n "$WS/dev" && bash -n "$WS/tools/dev/replay.sh" && ok "launcher and replay module parse" \
+  || bad "launcher syntax"
+
+reset_state
+run_dev replay
+[[ $RC -ne 0 ]] && assert_contains "replay requires --config" "requires --config" "$OUT" || bad "replay without --config should fail"
+
+run_dev replay --config "$TMP/missing.json"
+[[ $RC -ne 0 ]] && assert_contains "missing config is refused" "not found" "$OUT" || bad "missing config should fail"
+
+# 2. A failed offline verification stops before anything starts.
+reset_state
+touch "$STATE/prepare_fails"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -ne 0 ]] && assert_contains "verification failure is reported" "failed verification" "$OUT" \
+  || bad "verification failure should fail the launch"
+assert_not_contains "nothing starts after a failed verification" "systemctl --user start" "$CALLS"
+
+# 3. A busy replay port is refused before start.
+reset_state
+touch "$STATE/ports/18913"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -ne 0 ]] && assert_contains "busy broker port is refused" "already in use" "$OUT" || bad "busy port should refuse"
+assert_not_contains "busy port prevents start" "systemctl --user start" "$CALLS"
+
+# 4. Successful launch: prepared, paused, scoped unit and environment, no forbidden tools.
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -eq 0 ]] && ok "replay launch succeeds" || bad "replay launch failed: $OUT"
+assert_contains "the replay unit is started" "systemctl --user start q-replay.service" "$CALLS"
+assert_contains "the run is created through the admin API" "q-replay --url http://127.0.0.1:18914 create" "$CALLS"
+assert_contains "output names the external resume" "Resume after deployment setup" "$OUT"
+assert_not_contains "no forbidden tool runs" "FORBIDDEN" "$CALLS"
+UNIT="$TMP/home/.config/systemd/user/q-replay.service"
+if [[ -f "$UNIT" ]] && ! grep -q "__REPLAY" "$UNIT"; then ok "unit is rendered without placeholders"; else bad "unit not rendered"; fi
+ENVF="$STATE/replay-state/replay.env"
+if [[ -f "$ENVF" ]] && grep -q "Q_REPLAY_ADMIN_PORT=18914" "$ENVF" && grep -q "Q_REPLAY_STORE=" "$ENVF"; then
+  ok "run-scoped environment is written"
+else
+  bad "environment file missing"
+fi
+
+# 5. A running simulator refuses a second run.
+reset_state
+touch "$STATE/replay_active"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -ne 0 ]] && assert_contains "running simulator refuses a new run" "already running" "$OUT" \
+  || bad "a running simulator must refuse a new run"
+assert_not_contains "no second start while running" "systemctl --user start" "$CALLS"
+
+# 6. Scoped stop: replay only; live and research are untouched.
+reset_state
+touch "$STATE/replay_active"
+run_dev down replay
+assert_contains "down replay stops only the replay unit" "systemctl --user stop q-replay.service" "$CALLS"
+
+reset_state
+touch "$STATE/replay_active"
+run_dev down live
+assert_not_contains "down live leaves replay running" "q-replay.service" "$CALLS"
+
+reset_state
+touch "$STATE/replay_active"
+run_dev down all
+assert_contains "down all includes replay" "systemctl --user stop q-replay.service" "$CALLS"
+
+# 7. Restart by alias and the status section.
+reset_state
+touch "$STATE/replay_active"
+run_dev restart replay:simulator
+assert_contains "restart replay:simulator restarts the unit" "systemctl --user restart q-replay.service" "$CALLS"
+
+reset_state
+touch "$STATE/replay_active"
+run_dev status
+assert_contains "status lists the replay simulator" "Replay simulator (isolated)" "$OUT"
+
+# 8. The replay paths never call Docker, Wine or MT5 tooling (checked on a full stop and restart).
+reset_state
+touch "$STATE/replay_active"
+run_dev down replay
+assert_not_contains "replay stop calls no Docker, Wine or MT5 tool" "FORBIDDEN" "$CALLS"
+run_dev restart replay:simulator
+assert_not_contains "replay restart calls no Docker, Wine or MT5 tool" "FORBIDDEN" "$CALLS"
+
+echo "passed: $PASS failed: $FAIL"
+[[ $FAIL -eq 0 ]]
