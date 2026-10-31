@@ -168,6 +168,7 @@ UNIT="$TMP/home/.config/systemd/user/q-replay.service"
 if [[ -f "$UNIT" ]] && ! grep -q "__REPLAY" "$UNIT"; then ok "unit is rendered without placeholders"; else bad "unit not rendered"; fi
 # systemd ignores a quoted EnvironmentFile path; the simulator then starts without its settings.
 if grep -q "^EnvironmentFile=/" "$UNIT"; then ok "unit names its environment file unquoted"; else bad "EnvironmentFile must be an unquoted absolute path"; fi
+if grep -q "^WorkingDirectory=/" "$TMP/home/.config/systemd/user/q-replay-api.service"; then ok "unit names its working directory unquoted"; else bad "WorkingDirectory must be an unquoted absolute path"; fi
 ENVF="$STATE/replay-state/replay.env"
 if [[ -f "$ENVF" ]] && grep -q "Q_REPLAY_ADMIN_PORT=18914" "$ENVF" && grep -q "Q_REPLAY_STORE=" "$ENVF"; then
   ok "run-scoped environment is written"
