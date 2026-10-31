@@ -299,6 +299,11 @@ export_host_backend_env() {
   export Q_WORKER_PROCESSES="${Q_WORKER_PROCESSES:-14}"
   export Q_TORCH_DEVICE="${Q_TORCH_DEVICE:-cuda}"
   export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+  # Replay run control (Q-146) exists only on this host-mode API: it drives this launcher and reads
+  # the replay state file. The container stack never receives these settings.
+  export Q_REPLAY_CONTROL_ENABLED=1
+  export Q_REPLAY_LAUNCHER="$ROOT/dev"
+  export Q_REPLAY_STATE_DIR="${Q_REPLAY_STATE_DIR:-${STATE_DIR}/replay}"
 }
 
 host_port_open() {

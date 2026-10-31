@@ -13,6 +13,9 @@ REPLAY_ADMIN_URL="http://127.0.0.1:${REPLAY_ADMIN_PORT}"
 REPLAY_TEMPLATES="$BACKEND_DIR/deploy/systemd/replay"
 REPLAY_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 REPLAY_ENV_FILE="$REPLAY_STATE_DIR/replay.env"
+REPLAY_STATE_FILE="$REPLAY_STATE_DIR/current.json"
+REPLAY_PHASE_OPEN=0
+REPLAY_TOKEN=""
 REPLAY_BACKEND_ENV="$REPLAY_STATE_DIR/backend.env"
 REPLAY_COMPOSE=(docker compose --project-directory "$BACKEND_DIR" -f "$REPLAY_TEMPLATES/compose.yml" -p q-replay)
 
@@ -37,8 +40,51 @@ replay_lock() {
 replay_unit_active() { systemd_available && systemctl --user is-active --quiet "${1:-$REPLAY_UNIT}" 2>/dev/null; }
 replay_ready() {
   local code
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$REPLAY_ADMIN_URL/replay/v1/runs/current" 2>/dev/null || true)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Replay-Token: $REPLAY_TOKEN" \
+    "$REPLAY_ADMIN_URL/replay/v1/runs/current" 2>/dev/null || true)"
   [[ "$code" == 200 || "$code" == 404 ]]
+}
+
+# The state file is what the Research API reads (phase, run directory, generation, admin URL and
+# the per-run admin token). It is written atomically with mode 0600; values travel as argv, not code.
+replay_publish_state() {
+  local phase="$1" run_dir="${2:-}" generation="${3:-}" token="${4:-}"
+  mkdir -p "$REPLAY_STATE_DIR"
+  python3 - "$REPLAY_STATE_FILE" "$phase" "$run_dir" "$generation" "$token" "$REPLAY_ADMIN_URL" <<'REPLAY_PY_Q146'
+import json, os, pathlib, sys
+target, phase, run_dir, generation, token, admin_url = sys.argv[1:]
+payload = {"phase": phase}
+if run_dir:
+    payload["run_dir"] = run_dir
+if generation:
+    payload["generation"] = generation
+if token:
+    payload.update({"admin_url": admin_url, "admin_token": token})
+tmp = pathlib.Path(target + ".tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+os.replace(tmp, target)
+REPLAY_PY_Q146
+}
+
+# Token of the run whose state file is current; empty when none is published.
+replay_current_token() {
+  [[ -f "$REPLAY_STATE_FILE" ]] || return 0
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("admin_token", ""))' "$REPLAY_STATE_FILE" 2>/dev/null || true
+}
+
+replay_new_token() {
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+}
+
+# Runs on exit: a launch that failed after it began leaves the stack reported as failed, not starting.
+replay_exit_trap() {
+  local status="$1"
+  if [[ "$REPLAY_PHASE_OPEN" == 1 && "$status" != 0 ]]; then
+    replay_publish_state failed || true
+  fi
+  REPLAY_PHASE_OPEN=0
 }
 replay_api_ready() {
   [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$REPLAY_API_PORT/api/v1/system/health" 2>/dev/null || true)" == 200 ]]
@@ -119,6 +165,7 @@ replay_write_env() {
     replay_env Q_REPLAY_MARKET_PORT "$REPLAY_MARKET_PORT"
     replay_env Q_REPLAY_EDGE_PORT "$REPLAY_EDGE_PORT"
     replay_env Q_REPLAY_ADMIN_PORT "$REPLAY_ADMIN_PORT"
+    replay_env Q_REPLAY_TOKEN "$REPLAY_TOKEN"
   } >"$REPLAY_ENV_FILE"
   chmod 600 "$REPLAY_ENV_FILE"
 }
@@ -166,20 +213,38 @@ replay_write_backend_env() {
 }
 
 replay_start_consumers() {
+  local no_terminal="${1:-0}"
   systemctl --user start "$(replay_unit api)" "$(replay_unit outbox)" "$(replay_unit publisher)" "$(replay_unit execution)"
   wait_for "replay API" "journalctl --user -u $(replay_unit api) -n 30 --no-pager" replay_api_ready
+  if [[ "$no_terminal" != 1 ]]; then
+    systemctl --user start "$(replay_unit terminal)"
+  fi
+}
+
+replay_open_terminal() {
+  ensure_systemd_user
+  replay_lock
+  replay_unit_active && [[ -f "$REPLAY_STATE_FILE" ]] \
+    || die "the replay stack is not running; start it with ./dev replay --config <path> first"
   systemctl --user start "$(replay_unit terminal)"
+  echo "==> Replay terminal started (q-replay-terminal.service)."
 }
 
 cmd_replay() {
-  local config="" root=""
+  local config="" root="" no_terminal=0
+  if [[ "${1:-}" == terminal ]]; then
+    [[ $# -eq 1 ]] || die "replay terminal takes no options"
+    replay_open_terminal
+    return
+  fi
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config|--root)
         [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value"
         if [[ "$1" == --config ]]; then config="$2"; else root="$2"; fi
         shift 2 ;;
-      *) die "unknown replay option: $1 (expected --config <path> [--root <dir>])" ;;
+      --no-terminal) no_terminal=1; shift ;;
+      *) die "unknown replay option: $1 (expected --config <path> [--root <dir>] [--no-terminal] or terminal)" ;;
     esac
   done
   [[ -n "$config" ]] || die "./dev replay requires --config <path>"
@@ -200,10 +265,13 @@ cmd_replay() {
     [[ -f "$REPLAY_STATE_DIR/fingerprint" && "$(cat "$REPLAY_STATE_DIR/fingerprint")" == "$fingerprint" ]] \
       || die "a different replay generation is already running; stop it with ./dev down replay first"
     local generation
-    generation="$("$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" status | python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')"
+    REPLAY_TOKEN="$(replay_current_token)"
+    generation="$(Q_REPLAY_TOKEN="$REPLAY_TOKEN" "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" status \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')"
     [[ -f "$REPLAY_STATE_DIR/generation" && "$generation" == "$(cat "$REPLAY_STATE_DIR/generation")" ]] \
       || die "replay generation replaced; stop all replay services before starting again"
-    replay_start_consumers
+    replay_publish_state ready "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run_dir",""))' "$REPLAY_STATE_FILE" 2>/dev/null || true)" "$generation" "$REPLAY_TOKEN"
+    replay_start_consumers "$no_terminal"
     echo "==> Replay already running; reused generation $generation."
     return
   fi
@@ -227,14 +295,19 @@ cmd_replay() {
     || die "released q_core replay execution capability unavailable; sync the documented backend dependencies"
   ensure_docker
   local run_dir generation
+  replay_publish_state starting
+  REPLAY_PHASE_OPEN=1
+  trap 'replay_exit_trap $?' EXIT
   run_dir="$(mktemp -d "$REPLAY_STATE_DIR/run-XXXXXXXX")"
   cp "$config" "$run_dir/config.json"
+  REPLAY_TOKEN="$(replay_new_token)"
   replay_write_env "$run_dir" "$root"
   replay_install_units "$run_dir"
   systemctl --user daemon-reload
   systemctl --user start "$REPLAY_UNIT"
   wait_for "replay simulator" "journalctl --user -u $REPLAY_UNIT -n 30 --no-pager" replay_ready
-  "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" create --config "$run_dir/config.json" >"$run_dir/created.json" \
+  Q_REPLAY_TOKEN="$REPLAY_TOKEN" "$REPLAY_BIN" --url "$REPLAY_ADMIN_URL" create --config "$run_dir/config.json" \
+    >"$run_dir/created.json" \
     || die "replay run creation failed (see journalctl --user -u $REPLAY_UNIT)"
   generation="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["generation"])' "$run_dir/created.json")"
   [[ "$generation" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid replay generation"
@@ -255,9 +328,11 @@ subprocess.run([alembic, '-c', ini, 'upgrade', 'head'], env=env, cwd=run_dir, ch
 PY
   printf '%s\n' "$fingerprint" >"$REPLAY_STATE_DIR/fingerprint"
   printf '%s\n' "$generation" >"$REPLAY_STATE_DIR/generation"
-  replay_start_consumers
+  replay_start_consumers "$no_terminal"
+  replay_publish_state ready "$run_dir" "$generation" "$REPLAY_TOKEN"
+  REPLAY_PHASE_OPEN=0
   echo "==> Replay stack prepared and paused (run state: $run_dir)."
-  echo "    Resume after deployment setup: $REPLAY_BIN --url $REPLAY_ADMIN_URL resume"
+  echo "    Resume after deployment setup: Q_REPLAY_TOKEN from $REPLAY_STATE_FILE; $REPLAY_BIN --url $REPLAY_ADMIN_URL resume"
   echo "    Stop: ./dev down replay. Live and research stacks are not affected."
 }
 
@@ -268,6 +343,7 @@ cmd_down_replay() {
       "$(replay_unit outbox)" "$(replay_unit api)" "$REPLAY_UNIT" 2>/dev/null || true
   fi
   if [[ -f "$REPLAY_STATE_DIR/compose.env" ]] && command -v docker >/dev/null 2>&1; then replay_compose down; fi
+  replay_publish_state idle
   echo "==> Replay stack stopped (run state and database volumes kept for inspection)."
 }
 
