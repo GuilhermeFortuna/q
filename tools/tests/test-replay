@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression harness for ./dev replay (Q-145). Uses fake systemctl, curl, journalctl and q-replay
-# on PATH: no Docker, Wine, MT5, GPU or network is needed, and none of those commands may run.
+# on PATH: no real Docker, Wine, MT5, GPU or network is needed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -25,6 +25,7 @@ WS="$TMP/ws"
 BIN="$TMP/bin"
 LOG="$TMP/calls.log"
 STATE="$TMP/state"
+DEV_ENV=()
 mkdir -p "$WS/tools/dev" "$WS/tools/tests" "$WS/q_backend/.venv/bin" "$WS/q_backend/deploy/systemd/replay" \
   "$BIN" "$STATE/ports" "$TMP/home" "$TMP/dataset" "$TMP/config-dir"
 cp "$ROOT/dev" "$WS/dev"
@@ -35,9 +36,11 @@ cp "$ROOT/tools/tests/test-replay" "$WS/tools/tests/"
 TEMPLATE_SRC="${Q_TEST_TEMPLATE:-$ROOT/q_backend/deploy/systemd/replay/q-replay.service.in}"
 [[ -f "$TEMPLATE_SRC" ]] || { echo "FAIL: unit template not found: $TEMPLATE_SRC (set Q_TEST_TEMPLATE)" >&2; exit 1; }
 cp "$TEMPLATE_SRC" "$WS/q_backend/deploy/systemd/replay/q-replay.service.in"
+cp "$(dirname "$TEMPLATE_SRC")/q-replay-backend.service.in" "$WS/q_backend/deploy/systemd/replay/"
+cp "$(dirname "$TEMPLATE_SRC")/compose.yml" "$WS/q_backend/deploy/systemd/replay/"
 chmod +x "$WS/dev"
 CONFIG="$TMP/config-dir/run.json"
-echo '{}' >"$CONFIG"
+echo '{"symbols":["PETR4"],"account":{"login":145}}' >"$CONFIG"
 
 # Fake systemctl: records the call; `is-active` follows the state file.
 cat >"$BIN/systemctl" <<'FAKE'
@@ -46,8 +49,9 @@ echo "systemctl $*" >>"$Q_TEST_CALLS"
 case "$*" in
   "--user status") exit 0 ;;
   "--user start q-replay.service"|"--user restart q-replay.service") touch "$Q_TEST_STATE/replay_active" ;;
-  "--user stop q-replay.service") rm -f "$Q_TEST_STATE/replay_active" ;;
+  "--user stop "*"q-replay.service") rm -f "$Q_TEST_STATE/replay_active" ;;
   "--user is-active --quiet q-replay.service") [[ -f "$Q_TEST_STATE/replay_active" ]] ;;
+  "--user is-active --quiet q-replay-"*) [[ -f "$Q_TEST_STATE/consumer_active" ]] ;;
   *) exit 0 ;;
 esac
 FAKE
@@ -61,7 +65,16 @@ cat >"$BIN/journalctl" <<'FAKE'
 #!/usr/bin/env bash
 echo "journalctl $*" >>"$Q_TEST_CALLS"
 FAKE
-for tool in docker wine python3-mt5; do
+cat >"$BIN/docker" <<'FAKE'
+#!/usr/bin/env bash
+echo "docker $*" >>"$Q_TEST_CALLS"
+echo "volume-prefix ${Q_REPLAY_VOLUME_PREFIX:-unset}" >>"$Q_TEST_CALLS"
+[[ "$*" == *"ps --status running --services"* ]] && { [[ -f "$Q_TEST_STATE/infra" ]] && printf 'postgres\nredis\n'; exit 0; }
+[[ "$*" == *"up -d"* ]] && touch "$Q_TEST_STATE/infra"
+[[ "$*" == *"down"* ]] && rm -f "$Q_TEST_STATE/infra"
+exit 0
+FAKE
+for tool in wine python3-mt5 nvidia-smi; do
   cat >"$BIN/$tool" <<FAKE
 #!/usr/bin/env bash
 echo "FORBIDDEN $tool \$*" >>"\$Q_TEST_CALLS"
@@ -72,20 +85,31 @@ done
 cat >"$WS/q_backend/.venv/bin/q-replay" <<'FAKE'
 #!/usr/bin/env bash
 echo "q-replay $*" >>"$Q_TEST_CALLS"
+if [[ "$*" == *"from q_core"* && -f "$Q_TEST_STATE/core_fails" ]]; then exit 1; fi
 if [[ "$1" == "prepare" && -f "$Q_TEST_STATE/prepare_fails" ]]; then
   echo "checksum mismatch" >&2
   exit 2
 fi
+if [[ "$*" == *"status"* && -f "$Q_TEST_STATE/replaced_generation" ]]; then
+  echo '{"generation":"gen-replaced","state":"paused"}'
+elif [[ "$*" == *"create"* || "$*" == *"status"* ]]; then echo '{"generation":"gen-test","state":"paused"}'; fi
 exit 0
 FAKE
-chmod +x "$BIN"/* "$WS/q_backend/.venv/bin/q-replay"
+for tool in python alembic q-api q-execution q-market-publisher q-outbox-relay; do
+  cp "$WS/q_backend/.venv/bin/q-replay" "$WS/q_backend/.venv/bin/$tool"
+done
+cat >"$WS/q_backend/.venv/bin/alembic" <<FAKE
+#!/usr/bin/env bash
+printf 'migration %s\\n' "\$*" >>"$LOG"
+FAKE
+chmod +x "$BIN"/* "$WS/q_backend/.venv/bin/"*
 
 run_dev() {
   : >"$LOG"
   set +e
   OUT="$(env -i PATH="$BIN:/usr/bin:/bin" HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" \
     Q_TEST_CALLS="$LOG" Q_TEST_STATE="$STATE" Q_REPLAY_STATE_DIR="$STATE/replay-state" \
-    Q_REPLAY_BIN="$WS/q_backend/.venv/bin/q-replay" Q_DEV_WAIT_ATTEMPTS=2 Q_DEV_WAIT_INTERVAL=0 \
+    "${DEV_ENV[@]}" Q_REPLAY_BIN="$WS/q_backend/.venv/bin/q-replay" Q_DEV_WAIT_ATTEMPTS=2 Q_DEV_WAIT_INTERVAL=0 \
     bash "$WS/dev" "$@" 2>&1)"
   RC=$?
   set -e
@@ -93,7 +117,7 @@ run_dev() {
 }
 
 reset_state() {
-  rm -rf "$STATE/replay_active" "$STATE/prepare_fails" "$STATE/ports"
+  rm -rf "$STATE/replay_active" "$STATE/prepare_fails" "$STATE/ports" "$STATE/infra" "$STATE/replay-state" "$STATE/consumer_active" "$STATE/replaced_generation" "$STATE/core_fails"
   mkdir -p "$STATE/ports"
 }
 
@@ -116,6 +140,11 @@ run_dev replay --config "$CONFIG" --root "$TMP/dataset"
   || bad "verification failure should fail the launch"
 assert_not_contains "nothing starts after a failed verification" "systemctl --user start" "$CALLS"
 
+reset_state
+touch "$STATE/core_fails"
+run_dev replay --config "$CONFIG"
+[[ $RC -ne 0 ]] && ok "absent released core capability refused" || bad "missing core accepted"
+assert_not_contains "missing core starts no service" "systemctl --user start" "$CALLS"
 # 3. A busy replay port is refused before start.
 reset_state
 touch "$STATE/ports/18913"
@@ -128,6 +157,7 @@ reset_state
 run_dev replay --config "$CONFIG" --root "$TMP/dataset"
 [[ $RC -eq 0 ]] && ok "replay launch succeeds" || bad "replay launch failed: $OUT"
 assert_contains "the replay unit is started" "systemctl --user start q-replay.service" "$CALLS"
+assert_contains "database is migrated" "migration -c" "$CALLS"
 assert_contains "the run is created through the admin API" "q-replay --url http://127.0.0.1:18914 create" "$CALLS"
 assert_contains "output names the external resume" "Resume after deployment setup" "$OUT"
 assert_not_contains "no forbidden tool runs" "FORBIDDEN" "$CALLS"
@@ -140,19 +170,45 @@ else
   bad "environment file missing"
 fi
 
-# 5. A running simulator refuses a second run.
+# Full stack services and isolation.
+for unit in api execution-worker market-publisher outbox-relay terminal; do
+  assert_contains "replay starts $unit" "q-replay-$unit.service" "$CALLS"
+done
+assert_contains "isolated infrastructure" "up -d --wait postgres redis" "$CALLS"
+for setting in "Q_DATABASE_URL=postgresql+psycopg://q:q@127.0.0.1:5436/q" "Q_REDIS_URL=redis://127.0.0.1:6382/0" "Q_MARKET_CLOCK_GENERATION=gen-test" "Q_MARKET_DATA_CACHE_NAMESPACE=gen-test" "Q_MT5_GATEWAY_URL=http://127.0.0.1:18912" "Q_MT5_EDGE_URL=http://127.0.0.1:18913" "Q_PORT=8002" "Q_TERMINAL_SYMBOL=PETR4" "Q_TERMINAL_TIMEFRAME=1m"; do
+  assert_contains "shared env $setting" "$setting" "$(cat "$STATE/replay-state/backend.env")"
+done
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -eq 0 ]] && ok "repeated start reuses same generation" || bad "repeated start failed: $OUT"
+assert_not_contains "repeated start creates no new run" " create " "$CALLS"
+assert_not_contains "repeated start writes no generation" "prepare" "$CALLS"
+
+touch "$STATE/replaced_generation"
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ $RC -ne 0 ]] && ok "generation replacement refused" || bad "replaced generation reused"
+assert_not_contains "replacement starts no consumers" "systemctl --user start" "$CALLS"
+rm "$STATE/replaced_generation"
+DEV_ENV=(Q_MT5_GATEWAY_URL=http://127.0.0.1:18812)
+run_dev replay --config "$CONFIG"
+[[ $RC -ne 0 ]] && ok "mixed live endpoint refused" || bad "mixed endpoint accepted"
+DEV_ENV=()
+# 5. A foreign running simulator refuses a second run.
 reset_state
 touch "$STATE/replay_active"
 run_dev replay --config "$CONFIG" --root "$TMP/dataset"
 [[ $RC -ne 0 ]] && assert_contains "running simulator refuses a new run" "already running" "$OUT" \
   || bad "a running simulator must refuse a new run"
 assert_not_contains "no second start while running" "systemctl --user start" "$CALLS"
+reset_state
+touch "$STATE/consumer_active"
+run_dev replay --config "$CONFIG"
+[[ $RC -ne 0 ]] && ok "orphaned consumers prevent new generation" || bad "orphaned consumers accepted"
 
 # 6. Scoped stop: replay only; live and research are untouched.
 reset_state
 touch "$STATE/replay_active"
 run_dev down replay
-assert_contains "down replay stops only the replay unit" "systemctl --user stop q-replay.service" "$CALLS"
+assert_contains "down replay stops only the replay unit" "q-replay.service" "$CALLS"
 
 reset_state
 touch "$STATE/replay_active"
@@ -162,7 +218,7 @@ assert_not_contains "down live leaves replay running" "q-replay.service" "$CALLS
 reset_state
 touch "$STATE/replay_active"
 run_dev down all
-assert_contains "down all includes replay" "systemctl --user stop q-replay.service" "$CALLS"
+assert_contains "down all includes replay" "q-replay.service" "$CALLS"
 
 # 7. Restart by alias and the status section.
 reset_state
@@ -173,15 +229,62 @@ assert_contains "restart replay:simulator restarts the unit" "systemctl --user r
 reset_state
 touch "$STATE/replay_active"
 run_dev status
-assert_contains "status lists the replay simulator" "Replay simulator (isolated)" "$OUT"
+assert_contains "status lists the replay simulator" "Replay stack (isolated)" "$OUT"
 
 # 8. The replay paths never call Docker, Wine or MT5 tooling (checked on a full stop and restart).
 reset_state
 touch "$STATE/replay_active"
 run_dev down replay
-assert_not_contains "replay stop calls no Docker, Wine or MT5 tool" "FORBIDDEN" "$CALLS"
+assert_not_contains "replay stop calls no Wine or MT5 tool" "FORBIDDEN" "$CALLS"
 run_dev restart replay:simulator
-assert_not_contains "replay restart calls no Docker, Wine or MT5 tool" "FORBIDDEN" "$CALLS"
+assert_not_contains "replay restart calls no Wine or MT5 tool" "FORBIDDEN" "$CALLS"
 
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+for service in api execution publisher outbox terminal postgres redis simulator; do
+  run_dev logs "replay:$service"
+  [[ $RC -eq 0 ]] && ok "logs replay:$service" || bad "logs replay:$service: $OUT"
+  case "$service" in
+    api|terminal) expected="journalctl --user -u q-replay-$service.service" ;;
+    execution) expected="journalctl --user -u q-replay-execution-worker.service" ;;
+    publisher) expected="journalctl --user -u q-replay-market-publisher.service" ;;
+    outbox) expected="journalctl --user -u q-replay-outbox-relay.service" ;;
+    simulator) expected="journalctl --user -u q-replay.service" ;;
+    postgres|redis) expected="logs -f $service" ;;
+  esac
+  assert_contains "logs resolves $service correctly" "$expected" "$CALLS"
+  run_dev restart "replay:$service"
+  [[ $RC -eq 0 ]] && ok "restart replay:$service" || bad "restart replay:$service: $OUT"
+done
+DEV_ENV=(Q_REPLAY_VOLUME_PREFIX=normal-live-data)
+run_dev logs replay:postgres
+assert_not_contains "caller cannot replace run volume identity" "volume-prefix normal-live-data" "$CALLS"
+assert_contains "stored volume identity used" "volume-prefix q-replay-run-" "$CALLS"
+DEV_ENV=()
+reset_state
+touch "$STATE/ports/8002"
+run_dev replay --config "$CONFIG"
+[[ $RC -ne 0 ]] && ok "API port collision refused" || bad "API collision accepted"
+assert_not_contains "API collision creates no run" " create " "$CALLS"
+# A stopped run leaves artifacts; the next run gets fresh storage/cache roots.
+reset_state
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+OLD_ENV="$(cat "$STATE/replay-state/backend.env")"
+run_dev down replay
+run_dev replay --config "$CONFIG" --root "$TMP/dataset"
+[[ "$OLD_ENV" != "$(cat "$STATE/replay-state/backend.env")" ]] && ok "next run uses fresh roots" || bad "run roots reused"
+assert_not_contains "normal backend env untouched" "/.config/q/backend.env" "$CALLS"
+assert_not_contains "normal units untouched" "start q-api.service" "$CALLS"
+reset_state
+DEV_ENV=(Q_REPLAY_PG_PORT=5434)
+touch "$STATE/ports/5434"
+run_dev replay --config "$CONFIG"
+[[ $RC -ne 0 ]] && ok "live Postgres collision refused" || bad "live Postgres collision accepted"
+DEV_ENV=()
+printf 'replay --config %s --root %s\nlogs replay:api\ndown replay\nexit\n' "$CONFIG" "$TMP/dataset" >"$TMP/input"
+reset_state
+run_dev shell <"$TMP/input"
+assert_contains "shell starts replay" "q-replay-api.service" "$CALLS"
+assert_contains "shell stops replay" "systemctl --user stop q-replay" "$CALLS"
 echo "passed: $PASS failed: $FAIL"
 [[ $FAIL -eq 0 ]]

@@ -9,7 +9,7 @@
 #   ./dev live                  # full live execution profile + q_terminal
 #   ./dev research [opts]       # research backend + UI (--host default | --container)
 #   ./dev gateway               # MT5 data gateway for Python scripts
-#   ./dev replay --config <p>   # isolated replay simulator, created paused (Q-145)
+#   ./dev replay --config <p>   # isolated replay live stack, created paused (Q-145)
 #   ./dev down [target]         # stop: live | research | replay | all (default: all)
 #   ./dev status                # concise stack overview of both stacks
 #   ./dev logs <service>        # follow logs with aliases (e.g. api, research:api)
@@ -84,7 +84,7 @@ Commands:
                           [--rebuild requires container mode]
   ./dev gateway           Start MT5 terminal and data gateway for scripts
   ./dev replay --config <path> [--root <dir>]
-                          Prepare an isolated replay simulator run (paused). Verifies the
+                          Start the isolated replay live stack and terminal (paused). Verifies the
                           config and dataset first; never touches live or research.
   ./dev down [target]     Stop stacks: live | research | replay | all (default: all)
   ./dev status            Show concise overview of both stacks, APIs, workers, UIs
@@ -103,10 +103,12 @@ Modes for research:
 Persistence and Lifecycle:
   Commands return after starting desktop UIs.
   Closing a UI window or pressing Ctrl+C does NOT tear down either backend.
-  Backends stay running until explicitly stopped via: ./dev down [live|research|all]
+  Backends stay running until explicitly stopped via: ./dev down [live|research|replay|all]
 
 Service aliases:
   Live:     postgres, redis, migrate, api, outbox, publisher, execution, live, terminal
+  Replay:   replay:simulator, replay:postgres, replay:redis, replay:api,
+            replay:execution, replay:publisher, replay:outbox, replay:terminal
   Shared:   mt5, gateway, edge
   Research: research:postgres, research:redis, research:migrate, research:api,
             research:worker, research:relay, research:ui
@@ -1017,7 +1019,7 @@ cmd_down() {
       echo "==> All Q dev stacks stopped."
       ;;
     *)
-      die "invalid down target: $target (expected live|research|all)"
+      die "invalid down target: $target (expected live|research|replay|all)"
       ;;
   esac
 }
@@ -1104,7 +1106,7 @@ cmd_status() {
       "$(readiness_summary "$alias")"
   done
 
-  echo "--- Replay simulator (isolated) ---"
+  echo "--- Replay stack (isolated) ---"
   replay_status_lines
 
   echo "--- Shared MT5 ---"
@@ -1141,7 +1143,7 @@ cmd_logs() {
     stack="research"
     svc="${target#research:}"
   elif [[ "$target" == replay:* || "$target" == replay ]]; then
-    journalctl --user -u "$REPLAY_UNIT" -f
+    replay_logs "${target#replay:}"
     return 0
   fi
 
@@ -1186,8 +1188,7 @@ cmd_restart() {
     stack="research"
     svc="${target#research:}"
   elif [[ "$target" == replay:* ]]; then
-    [[ "${target#replay:}" == "simulator" ]] || die "replay service is 'simulator' (replay:simulator)"
-    cmd_restart_replay
+    cmd_restart_replay "${target#replay:}"
     return 0
   fi
 

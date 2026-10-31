@@ -262,6 +262,47 @@ leave PID files intact. Run lifecycle commands from the host session: an isolate
 sandbox may not see host processes, Docker, or user services and cannot reliably report or
 stop them.
 
+#### Market replay
+
+`./dev replay --config /path/to/run.json --root /path/to/frozen-dataset` starts the
+complete isolated live stack with the simulated market gateway and broker. It requires the
+installed backend virtual environment (including the released `q_core` replay primitives),
+Docker Compose, a systemd user session, and the normal `q_terminal` build prerequisites.
+It never starts Wine, MT5 or GPU services, and never edits the normal backend environment.
+
+The `q-replay` Compose project provides Postgres on `5436` and Redis on `6382`; dedicated
+`q-replay-*.service` units run the control API on `8002`, execution worker, publisher, outbox
+relay and terminal. Simulator listeners use `18912` (market and clock), `18913` (broker),
+and `18914` (external controls). `Q_REPLAY_PG_PORT`, `Q_REPLAY_REDIS_PORT`,
+`Q_REPLAY_API_PORT`, `Q_REPLAY_MARKET_PORT`, `Q_REPLAY_EDGE_PORT`, and
+`Q_REPLAY_ADMIN_PORT` override these ports. All six ports must be distinct and available.
+Unset caller `Q_MT5_GATEWAY_URL` and `Q_MT5_EDGE_URL` values that point at the normal stack.
+
+Runs start **paused**. Configure a demo deployment through the ordinary terminal flow, then
+resume from another shell using the command printed by the launcher:
+
+```bash
+q_backend/.venv/bin/q-replay --url http://127.0.0.1:18914 resume
+./dev logs replay:execution
+./dev restart replay:publisher
+./dev down replay
+```
+
+Replay aliases are `replay:simulator`, `replay:postgres`, `replay:redis`, `replay:api`,
+`replay:execution`, `replay:publisher`, `replay:outbox`, and `replay:terminal`; they appear in
+`./dev status` and work with `logs` and `restart`. The interactive shell accepts
+`replay --config <path> [--root <dir>]` or `up replay --config <path> [--root <dir>]`.
+Closing the terminal or exiting the shell leaves the stack running. `down replay` stops
+only replay; `down all` includes it.
+
+A repeated start with the same configuration and endpoints reuses the active generation.
+Changing configuration, dataset root or ports requires `./dev down replay` first. Every new
+run gets fresh Postgres/Redis volumes, operational data/cache roots, and terminal settings
+under `${XDG_STATE_HOME:-~/.local/state}/q-dev/replay` (`Q_REPLAY_STATE_DIR` overrides).
+Stopped run artifacts and volumes are retained for inspection; stopping never deletes them.
+The frozen input dataset stays external. Each run's isolated `strategies/` directory starts
+empty; add the strategy files needed by the demo there using your normal strategy workflow.
+
 #### Terminal chart target and precedence
 
 When starting the live stack (`./dev`, `./dev live`, `./dev all`, or `dev> up live`), `q_terminal` resolves its initial chart target through the following field-by-field precedence hierarchy:

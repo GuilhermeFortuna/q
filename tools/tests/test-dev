@@ -84,7 +84,7 @@ setup_workspace() {
   local cmd
   for cmd in bash sha256sum find awk timeout sed cat cp mkdir chmod grep sort \
     mktemp sleep kill printf true false tr cut head tail date uname env basename dirname \
-    readlink setsid rm ln tee mv cksum touch cmp python3; do
+    readlink setsid rm ln tee mv cksum touch cmp python3 flock; do
     if command -v "$cmd" >/dev/null 2>&1; then
       ln -sfn "$(command -v "$cmd")" "$ws/sysbin/$cmd"
     fi
